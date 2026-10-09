@@ -703,8 +703,22 @@ export function openCodePermissionRules(
     }
   }
 
+  // Linked multi-folder members are part of the workspace, not outside it;
+  // `edit` still decides whether changing them needs approval.
+  for (const directory of runtimePolicy.additionalDirectories ?? []) {
+    rules.push({
+      permission: "external_directory",
+      pattern: `${directory.replace(/\/$/, "")}/*`,
+      action: "allow",
+    });
+  }
+
   return rules;
 }
+
+/** What a session's permission rules were last set from; a different policy rewrites them. */
+const permissionRulesKey = (runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy) =>
+  JSON.stringify(openCodePermissionRules(runtimePolicy));
 
 function permissionRuleEquals(
   left: PermissionRuleset[number],
@@ -1016,6 +1030,8 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
         // task child keeps running after its parent turn settles, so idle
         // release must not close the server under it.
         const busySessionIds = new Set<string>();
+        // The rules each native session was last given; unknown after a restart.
+        const permissionRulesBySessionId = new Map<string, string>();
         // Requests settled before their session relation resolved: a late
         // routing attempt must never resurrect them. Bounded because entries
         // only matter for the seconds a routing retry can still be running.
@@ -3048,6 +3064,10 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   }),
               );
               const nativeSession = unwrapData("session.create", response);
+              permissionRulesBySessionId.set(
+                nativeSession.id,
+                permissionRulesKey(threadInput.runtimePolicy),
+              );
               const createdAt = yield* DateTime.now;
               const created = makeProviderThread({
                 idAllocator,
@@ -3140,6 +3160,18 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 return yield* protocolError(
                   `OpenCode model '${turnInput.modelSelection.model}' must use provider/model format`,
                 );
+              }
+              // A session's rules are set when it is created; a runtime mode
+              // change or a folder linked to a multi-folder project since then
+              // would otherwise ask first. Unknown after a restart, so the first
+              // turn then rewrites them once.
+              const rulesKey = permissionRulesKey(turnInput.runtimePolicy);
+              if (permissionRulesBySessionId.get(sessionId) !== rulesKey) {
+                const permission = openCodePermissionRules(turnInput.runtimePolicy);
+                yield* sdkCall("session.update", { sessionID: sessionId, permission }, () =>
+                  client.session.update({ sessionID: sessionId, permission }),
+                );
+                permissionRulesBySessionId.set(sessionId, rulesKey);
               }
               const isCompaction =
                 turnInput.message.text.trim() === "/compact" &&
@@ -3608,6 +3640,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                     permission: openCodePermissionRules(input.runtimePolicy),
                   }),
                 );
+                permissionRulesBySessionId.set(fork.id, permissionRulesKey(input.runtimePolicy));
                 retainedThread = {
                   ...rollbackInput.providerThread,
                   nativeThreadRef: providerRef(fork.id),

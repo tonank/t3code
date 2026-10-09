@@ -8,6 +8,7 @@ import {
   type VcsInitInput,
   VcsUnsupportedOperationError,
 } from "@t3tools/contracts";
+import { isMultiFolderRoot } from "../workspace/MultiFolderWorkspace.ts";
 import * as VcsDriverRegistry from "./VcsDriverRegistry.ts";
 
 export class VcsProvisioningService extends Context.Service<
@@ -43,6 +44,17 @@ export const make = Effect.gen(function* () {
     "VcsProvisioningService.initRepository",
   )(function* (input) {
     const kind = yield* resolveRequestedKind(input.kind);
+    // A multi-folder project's folder only links other folders. Git for
+    // Windows reads a junction as a plain directory, so a repository there
+    // would commit, and a restore could clean, every linked folder's files.
+    if (yield* Effect.promise(() => isMultiFolderRoot(input.cwd))) {
+      return yield* new VcsUnsupportedOperationError({
+        operation: "VcsProvisioningService.initRepository",
+        kind,
+        detail:
+          "This project folder links other folders. Initialize a repository in one of them instead.",
+      });
+    }
     const driver = yield* registry.get(kind);
     return yield* driver.initRepository(input);
   });

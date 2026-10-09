@@ -12,6 +12,7 @@ import { VcsUnsupportedOperationError } from "@t3tools/contracts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import * as VcsProjectConfig from "./VcsProjectConfig.ts";
 import * as VcsDriver from "./VcsDriver.ts";
+import { isMultiFolderRoot } from "../workspace/MultiFolderWorkspace.ts";
 
 const DETECTION_CACHE_CAPACITY = 2_048;
 // Status polls detect every open cwd each tick, and detection costs three git
@@ -169,6 +170,11 @@ export const make = Effect.gen(function* () {
   // `git init` created a nested repository between the cwd and its root.
   const detect: VcsDriverRegistry["Service"]["detect"] = Effect.fn("VcsDriverRegistry.detect")(
     function* (input) {
+      // A multi-folder project's folder only links other folders. A repository
+      // above it (a T3 home inside a checkout, a dotfiles home) must not claim
+      // it: status, checkpoints and worktrees would all act on that repository,
+      // and on Windows stage every linked folder's files into it.
+      if (yield* Effect.promise(() => isMultiFolderRoot(input.cwd))) return null;
       const requestedKind = yield* projectConfig.resolveKind(input);
       const key = detectionCacheKey({ cwd: input.cwd, requestedKind });
       const cached = yield* Cache.get(detectionCache, key);

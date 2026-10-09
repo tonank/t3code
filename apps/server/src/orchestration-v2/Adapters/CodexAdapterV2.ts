@@ -702,6 +702,27 @@ function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
   }
 }
 
+/**
+ * The workspace-write sandbox checks real paths, so folders linked into a
+ * multi-folder cwd are writable only as explicit roots.
+ */
+function withAdditionalWritableRoots(
+  sandboxPolicy: CodexSchema.V2TurnStartParams__SandboxPolicy | null,
+  additionalDirectories: ReadonlyArray<string> | undefined,
+): CodexSchema.V2TurnStartParams__SandboxPolicy | null {
+  if (
+    sandboxPolicy?.type !== "workspaceWrite" ||
+    additionalDirectories === undefined ||
+    additionalDirectories.length === 0
+  ) {
+    return sandboxPolicy;
+  }
+  return {
+    ...sandboxPolicy,
+    writableRoots: [...new Set([...(sandboxPolicy.writableRoots ?? []), ...additionalDirectories])],
+  };
+}
+
 export function buildCodexTurnStartParams(input: {
   readonly nativeThreadId: string;
   readonly codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>;
@@ -721,10 +742,12 @@ export function buildCodexTurnStartParams(input: {
       input.runtimePolicy.approvalPolicy === undefined
         ? runtimeModeDefaults.approvalPolicy
         : yield* decodeTurnApprovalPolicy(input.runtimePolicy.approvalPolicy);
-    const sandboxPolicy =
+    const sandboxPolicy = withAdditionalWritableRoots(
       input.runtimePolicy.sandboxPolicy === undefined
         ? runtimeModeDefaults.sandboxPolicy
-        : yield* decodeTurnSandboxPolicy(input.runtimePolicy.sandboxPolicy);
+        : yield* decodeTurnSandboxPolicy(input.runtimePolicy.sandboxPolicy),
+      input.runtimePolicy.additionalDirectories,
+    );
     const selectedEffort = getModelSelectionStringOptionValue(
       input.modelSelection,
       "reasoningEffort",

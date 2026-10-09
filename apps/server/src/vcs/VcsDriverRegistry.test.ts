@@ -109,6 +109,27 @@ describe("VcsDriverRegistry", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("detects no repository in a multi-folder project folder, even inside one", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const repoDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vcs-registry-" });
+      yield* fs.makeDirectory(path.join(repoDir, ".git"));
+      const linksFolder = path.join(repoDir, "projects", "storefront");
+      yield* fs.makeDirectory(linksFolder, { recursive: true });
+      yield* fs.writeFileString(path.join(linksFolder, ".t3-multi-folder"), "");
+      const calls: string[] = [];
+
+      yield* Effect.gen(function* () {
+        const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
+        assert.equal(yield* registry.detect({ cwd: linksFolder }), null);
+        // Decided from the marker alone, before git is asked.
+        assert.deepStrictEqual(calls, []);
+        assert.equal((yield* registry.detect({ cwd: repoDir }))?.repository.rootPath, repoDir);
+      }).pipe(Effect.provide(makeDiskBackedLayer(repoDir, calls)));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("detects again when a cached repository is removed from disk", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

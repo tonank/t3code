@@ -13,6 +13,7 @@ import { vi } from "vite-plus/test";
 import * as ServerConfig from "../config.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as MultiFolderWorkspace from "./MultiFolderWorkspace.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 
@@ -25,6 +26,7 @@ const layerTest = Layer.empty.pipe(
   Layer.provideMerge(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
   Layer.provideMerge(WorkspacePaths.layer),
   Layer.provideMerge(VcsProcess.layer),
+  Layer.provideMerge(MultiFolderWorkspace.layer),
   Layer.provide(
     ServerConfig.ServerConfig.layerTest(process.cwd(), {
       prefix: "t3-workspace-entries-test-",
@@ -82,6 +84,25 @@ const searchWorkspaceEntries = (input: {
     const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
     return yield* workspaceEntries.search(input);
   });
+
+/** A multi-folder root linking two folders that live elsewhere: `api` (a git repo) and `web`. */
+const makeMultiFolderRoot = Effect.fn("makeMultiFolderRoot")(function* () {
+  const multiFolderWorkspace = yield* MultiFolderWorkspace.MultiFolderWorkspace;
+  const path = yield* Path.Path;
+  const base = yield* makeTempDir({ prefix: "t3code-workspace-multi-folder-" });
+  const api = path.join(base, "repos", "api");
+  const web = path.join(base, "repos", "web");
+  yield* writeTextFile(api, "src/server.ts", "export const handler = 1;\n");
+  yield* writeTextFile(api, ".gitignore", "dist/\n");
+  yield* writeTextFile(api, "dist/bundle.js");
+  yield* git(api, ["init"]);
+  yield* writeTextFile(web, "src/App.tsx", "export const handler = 2;\n");
+  const root = path.join(base, "project");
+  yield* multiFolderWorkspace.initialize(root);
+  yield* multiFolderWorkspace.link({ root, target: api });
+  yield* multiFolderWorkspace.link({ root, target: web });
+  return { root, api, web };
+});
 
 const appendSeparator = (input: string) =>
   Effect.map(HostProcess.Platform, (platform) =>
@@ -793,6 +814,33 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
       }),
     );
 
+    it.effect("marks repository roots, including worktrees, but not folders inside them", () =>
+      Effect.gen(function* () {
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-browse-git-" });
+        yield* writeTextFile(cwd, "api/.git/HEAD", "ref: refs/heads/main\n");
+        yield* writeTextFile(cwd, "api-worktree/.git", "gitdir: /elsewhere\n");
+        yield* writeTextFile(cwd, "api/src/index.ts", "export {};\n");
+        yield* writeTextFile(cwd, "notes/todo.md", "todo\n");
+
+        const root = yield* workspaceEntries.browse({ partialPath: `${cwd}${path.sep}` });
+        const inside = yield* workspaceEntries.browse({
+          partialPath: `${path.join(cwd, "api")}${path.sep}`,
+        });
+
+        expect(root.entries).toEqual([
+          { name: "api", fullPath: path.join(cwd, "api"), isGitRepository: true },
+          { name: "api-worktree", fullPath: path.join(cwd, "api-worktree"), isGitRepository: true },
+          { name: "notes", fullPath: path.join(cwd, "notes") },
+        ]);
+        expect(inside.entries.find((entry) => entry.name === "src")).toEqual({
+          name: "src",
+          fullPath: path.join(cwd, "api", "src"),
+        });
+      }),
+    );
+
     it.effect("shows dot directories in directory mode and hidden-prefix mode", () =>
       Effect.gen(function* () {
         const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
@@ -865,6 +913,162 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
           partialPath: yield* appendSeparator(cwd),
         });
         expect(result).toEqual({ parentPath: cwd, entries: [] });
+      }),
+    );
+  });
+
+  describe("multi-folder roots", () => {
+    it.effect("searches every member and prefixes paths with the member name", () =>
+      Effect.gen(function* () {
+        const { root } = yield* makeMultiFolderRoot();
+
+        const result = yield* searchWorkspaceEntries({ cwd: root, query: "src", limit: 100 });
+        const paths = result.entries.map((entry) => entry.path);
+
+        expect(paths).toEqual(
+          expect.arrayContaining(["api/src", "api/src/server.ts", "web/src", "web/src/App.tsx"]),
+        );
+        expect(result.truncated).toBe(false);
+      }),
+    );
+
+    it.effect("scopes a search to one member with a member-name prefix", () =>
+      Effect.gen(function* () {
+        const { root } = yield* makeMultiFolderRoot();
+
+        const result = yield* searchWorkspaceEntries({ cwd: root, query: "web/", limit: 100 });
+        const paths = result.entries.map((entry) => entry.path);
+
+        expect(paths).toContain("web/src/App.tsx");
+        expect(paths.every((entryPath) => entryPath.startsWith("web/"))).toBe(true);
+      }),
+    );
+
+    it.effect("searches every member when a member-name prefix finds nothing in it", () =>
+      Effect.gen(function* () {
+        const { root, web } = yield* makeMultiFolderRoot();
+        yield* writeTextFile(web, "src/api/client.ts", "");
+
+        const result = yield* searchWorkspaceEntries({
+          cwd: root,
+          query: "api/client",
+          limit: 100,
+        });
+
+        expect(result.entries.map((entry) => entry.path)).toContain("web/src/api/client.ts");
+      }),
+    );
+
+    it.effect("caps merged search results at the limit and reports truncation", () =>
+      Effect.gen(function* () {
+        const { root } = yield* makeMultiFolderRoot();
+
+        const result = yield* searchWorkspaceEntries({ cwd: root, query: "", limit: 3 });
+
+        expect(result.entries).toHaveLength(3);
+        expect(result.truncated).toBe(true);
+      }),
+    );
+
+    it.effect("searches contents across members with prefixed paths", () =>
+      Effect.gen(function* () {
+        const { root } = yield* makeMultiFolderRoot();
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+
+        const result = yield* workspaceEntries.searchContents({
+          cwd: root,
+          query: "handler",
+          limit: 100,
+          caseSensitive: false,
+          wholeWord: false,
+          useRegex: false,
+        });
+
+        expect(result.matches.map((match) => match.path).toSorted()).toEqual([
+          "api/src/server.ts",
+          "web/src/App.tsx",
+        ]);
+      }),
+    );
+
+    it.effect("finds files added to a member after a refresh of the root", () =>
+      Effect.gen(function* () {
+        const { root, web } = yield* makeMultiFolderRoot();
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        yield* searchWorkspaceEntries({ cwd: root, query: "", limit: 100 });
+
+        yield* writeTextFile(web, "src/Settings.tsx");
+        yield* workspaceEntries.refresh(root);
+
+        const result = yield* searchWorkspaceEntries({ cwd: root, query: "settings", limit: 10 });
+        expect(result.entries.map((entry) => entry.path)).toContain("web/src/Settings.tsx");
+      }),
+    );
+
+    it.effect("refuses to list a link inside a member that leaves it", () =>
+      Effect.gen(function* () {
+        const { root, api } = yield* makeMultiFolderRoot();
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const outside = yield* makeTempDir({ prefix: "t3code-workspace-outside-" });
+        yield* fileSystem.symlink(outside, path.join(api, "escape"));
+
+        const error = yield* workspaceEntries
+          .list({ cwd: root, directoryPath: "api/escape" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceEntries.WorkspaceEntriesReadDirectoryError);
+      }),
+    );
+
+    it.effect("lists members as directories and browses into them", () =>
+      Effect.gen(function* () {
+        const { root } = yield* makeMultiFolderRoot();
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+
+        const top = yield* workspaceEntries.list({ cwd: root, directoryPath: "" });
+        expect(top.entries.toSorted((left, right) => left.path.localeCompare(right.path))).toEqual([
+          { path: "api", kind: "directory" },
+          { path: "web", kind: "directory" },
+        ]);
+
+        const api = yield* workspaceEntries.list({ cwd: root, directoryPath: "api" });
+        expect(api.entries).toEqual(
+          expect.arrayContaining([
+            { path: "api/src", kind: "directory" },
+            { path: "api/dist", kind: "directory", ignored: true },
+          ]),
+        );
+        expect(api.entries.some((entry) => entry.path === "api/.git")).toBe(false);
+
+        const webSrc = yield* workspaceEntries.list({ cwd: root, directoryPath: "web/src" });
+        expect(webSrc.entries).toEqual([{ path: "web/src/App.tsx", kind: "file" }]);
+
+        const error = yield* workspaceEntries
+          .list({ cwd: root, directoryPath: "api/.git" })
+          .pipe(Effect.flip);
+        expect(error._tag).toBe("WorkspaceEntriesReadDirectoryError");
+      }),
+    );
+
+    it.effect("returns the merged index of every member", () =>
+      Effect.gen(function* () {
+        const { root } = yield* makeMultiFolderRoot();
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+
+        const result = yield* workspaceEntries.list({ cwd: root });
+
+        expect(result.entries).toEqual(
+          expect.arrayContaining([
+            { path: "api", kind: "directory" },
+            { path: "api/src/server.ts", kind: "file" },
+            { path: "web", kind: "directory" },
+            { path: "web/src/App.tsx", kind: "file" },
+          ]),
+        );
+        expect(result.entries.some((entry) => entry.path.startsWith("api/dist"))).toBe(false);
+        expect(result.truncated).toBe(false);
       }),
     );
   });

@@ -203,6 +203,33 @@ export function createProjectEnvironmentAtoms<R, E>(
       scheduler: projectScheduler,
       concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
     }),
+    // Makes a new folder linking each chosen folder, then the project.
+    createMultiFolder: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:create-multi-folder",
+      tag: WS_METHODS.projectsCreateMultiFolder,
+      scheduler: projectScheduler,
+      concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
+    }),
+    // A multi-folder project's folders; `folders` is null for any other project.
+    // Links made on another device send no event, so each showing re-reads them.
+    linkedFolders: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:projects:linked-folders",
+      tag: WS_METHODS.projectsListLinkedFolders,
+      staleTimeMs: 0,
+    }),
+    // Both return the project's folders after the change.
+    linkFolder: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:link-folder",
+      tag: WS_METHODS.projectsLinkFolder,
+      scheduler: projectScheduler,
+      concurrency: projectConcurrency,
+    }),
+    unlinkFolder: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:unlink-folder",
+      tag: WS_METHODS.projectsUnlinkFolder,
+      scheduler: projectScheduler,
+      concurrency: projectConcurrency,
+    }),
     writeFile: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:projects:write-file",
       tag: WS_METHODS.projectsWriteFile,

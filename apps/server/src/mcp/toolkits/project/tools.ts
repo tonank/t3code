@@ -13,6 +13,7 @@ import {
   ProjectCreatePayload,
   ProjectUpdatePayload,
   ProjectId,
+  ProjectLinkedFolder,
   OrchestratorMcpFailure,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
@@ -60,20 +61,47 @@ const ProjectListTool = Tool.make("t3_project_list", {
 const ProjectReadTool = Tool.make("t3_project_read", {
   ...shared,
   description:
-    "Read a registered project in this environment, including its workspace and saved scripts.",
+    "Read a registered project in this environment, including its workspace and saved scripts. A multi-folder project also lists its linkedFolders.",
   parameters: Schema.Struct({ projectId: ProjectId }),
+  success: Schema.Struct({
+    ...Project.fields,
+    linkedFolders: Schema.optional(Schema.Array(ProjectLinkedFolder)),
+  }),
+  dependencies: [...shared.dependencies, ManagedProjectFolders.ManagedProjectFolders],
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 const ProjectCreateTool = Tool.make("t3_project_create", {
   ...shared,
   description:
-    "Register a project directory through the existing project service. Set createWorkspaceRootIfMissing to create a directory. Omit workspaceRoot to start a new project from just its title: the app makes a Git repository for it in its own projects folder, with a README, an icon, and a first commit (commitError says why a commit failed; the project exists either way). Each call creates a new request; an existing registered workspace is rejected. Clone separately with t3_project_clone when needed.",
+    "Register a project directory through the existing project service. Set createWorkspaceRootIfMissing to create a directory. Omit workspaceRoot to start a new project from just its title: the app makes a Git repository for it in its own projects folder, with a README, an icon, and a first commit (commitError says why a commit failed; the project exists either way). Omit workspaceRoot and pass linkedFolders to start a multi-folder project instead: the app makes a folder in its projects folder that links each one, and agents in it can read and edit every folder; it otherwise behaves like any project folder that holds those folders. Each call creates a new request; an existing registered workspace is rejected. Clone separately with t3_project_clone when needed.",
   parameters: Schema.Struct({
     ...ProjectCreatePayload.fields,
     workspaceRoot: Schema.optional(ProjectCreatePayload.fields.workspaceRoot),
+    linkedFolders: Schema.optional(
+      Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1)).annotate({
+        description:
+          "Absolute folder paths for a multi-folder project, each linked under its folder name. Only without workspaceRoot.",
+      }),
+    ),
   }),
   success: Schema.Struct({ ...Project.fields, commitError: Schema.optional(Schema.String) }),
+  dependencies: [...shared.dependencies, ManagedProjectFolders.ManagedProjectFolders],
+}).annotate(Tool.Destructive, true);
+const ProjectFoldersTool = Tool.make("t3_project_folders", {
+  ...shared,
+  description:
+    "Link or unlink the folders of a multi-folder project, and list the result. Linking adds a folder anywhere on this machine under its folder name; unlinking removes only the link, never the folder's files. To only list, read the project with t3_project_read. folders is null for a project that is not a multi-folder project.",
+  parameters: Schema.Struct({
+    projectId: ProjectId,
+    link: Schema.optional(
+      Schema.Array(TrimmedNonEmptyString).annotate({ description: "Absolute folder paths." }),
+    ),
+    unlink: Schema.optional(
+      Schema.Array(TrimmedNonEmptyString).annotate({ description: "Folder names in the project." }),
+    ),
+  }),
+  success: Schema.Struct({ folders: Schema.NullOr(Schema.Array(ProjectLinkedFolder)) }),
   dependencies: [...shared.dependencies, ManagedProjectFolders.ManagedProjectFolders],
 }).annotate(Tool.Destructive, true);
 const ProjectUpdateTool = Tool.make("t3_project_update", {
@@ -156,6 +184,7 @@ export const ProjectToolkit = Toolkit.make(
   ProjectListTool,
   ProjectReadTool,
   ProjectCreateTool,
+  ProjectFoldersTool,
   ProjectUpdateTool,
   ProjectDeleteTool,
   ProjectCloneTool,

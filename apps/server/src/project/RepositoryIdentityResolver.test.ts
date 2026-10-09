@@ -230,6 +230,26 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
 
+  it.effect("gives a multi-folder project folder no identity, even inside a repository", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const repoRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-repository-identity-multi-folder-test-",
+      });
+      const linksFolder = path.join(repoRoot, "projects", "storefront");
+      yield* fileSystem.makeDirectory(linksFolder, { recursive: true });
+      yield* fileSystem.writeFileString(path.join(linksFolder, ".t3-multi-folder"), "");
+      yield* git(repoRoot, ["init"]);
+      yield* git(repoRoot, ["remote", "add", "origin", "git@github.com:T3Tools/t3code.git"]);
+
+      const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+
+      expect(yield* resolver.resolve(linksFolder)).toBeNull();
+      expect(yield* resolver.resolve(repoRoot)).not.toBeNull();
+    }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
+  );
+
   it.effect("returns null for non-git folders and repos without remotes", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

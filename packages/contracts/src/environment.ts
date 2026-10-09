@@ -207,6 +207,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       Absent on older servers, where clients must clone with the blocking
       `sourceControl.cloneRepository` call instead. */
   projectCloneTracking: Schema.optionalKey(Schema.Boolean),
+  /** Server creates and manages multi-folder projects (`projects.createMultiFolder`,
+      `projects.listLinkedFolders`, `projects.linkFolder`, `projects.unlinkFolder`).
+      Absent on older servers, where clients hide the option. */
+  multiFolderProjects: Schema.optionalKey(Schema.Boolean),
   /** Server detects `platform.machine` and persists the `environmentIcon`
       setting. Older servers drop the key on write, so clients show the
       picker inert rather than offering a choice that would never stick. */

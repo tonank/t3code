@@ -11,6 +11,7 @@ import * as Path from "effect/Path";
 import * as ServerConfig from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as MultiFolderWorkspace from "./MultiFolderWorkspace.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
@@ -26,6 +27,7 @@ const layerTest = Layer.empty.pipe(
   Layer.provideMerge(layerProject),
   Layer.provideMerge(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
   Layer.provideMerge(WorkspacePaths.layer),
+  Layer.provideMerge(MultiFolderWorkspace.layer),
   Layer.provideMerge(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
   Layer.provide(
     ServerConfig.ServerConfig.layerTest(process.cwd(), {
@@ -267,6 +269,48 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         }),
     );
 
+    it.effect.skipIf(!symlinksSupported)(
+      "reads files inside a multi-folder root's linked members and nothing else",
+      () =>
+        Effect.gen(function* () {
+          const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const multiFolderWorkspace = yield* MultiFolderWorkspace.MultiFolderWorkspace;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const base = yield* makeTempDir;
+          const outsideDir = yield* makeTempDir;
+          const api = path.join(base, "api");
+          const web = path.join(base, "web");
+          yield* writeTextFile(api, "src/server.ts", "export const api = 1;\n");
+          yield* writeTextFile(web, "src/App.tsx", "export const web = 2;\n");
+          yield* writeTextFile(outsideDir, "secret.txt", "outside\n");
+          yield* fileSystem.symlink(outsideDir, path.join(api, "escape"));
+          const root = path.join(base, "project");
+          yield* multiFolderWorkspace.initialize(root);
+          yield* multiFolderWorkspace.link({ root, target: api });
+          yield* multiFolderWorkspace.link({ root, target: web });
+
+          const apiFile = yield* workspaceFileSystem.readFile({
+            cwd: root,
+            relativePath: "api/src/server.ts",
+          });
+          const webFile = yield* workspaceFileSystem.readFile({
+            cwd: root,
+            relativePath: "web/src/App.tsx",
+          });
+          expect(apiFile).toMatchObject({
+            relativePath: "api/src/server.ts",
+            contents: "export const api = 1;\n",
+          });
+          expect(webFile.contents).toBe("export const web = 2;\n");
+
+          const error = yield* workspaceFileSystem
+            .readFile({ cwd: root, relativePath: "api/escape/secret.txt" })
+            .pipe(Effect.flip);
+          expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+        }),
+    );
+
     it.effect("rejects directories without manufacturing an I/O cause", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -358,6 +402,33 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
 
         expect(result).toEqual({ relativePath: "plans/effect-rpc.md" });
         expect(saved).toBe("# Plan\n");
+      }),
+    );
+
+    it.effect("writes into a multi-folder root's linked member through its link", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const multiFolderWorkspace = yield* MultiFolderWorkspace.MultiFolderWorkspace;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const base = yield* makeTempDir;
+        const api = path.join(base, "api");
+        yield* writeTextFile(api, "src/server.ts", "export const api = 1;\n");
+        const root = path.join(base, "project");
+        yield* multiFolderWorkspace.initialize(root);
+        yield* multiFolderWorkspace.link({ root, target: api });
+
+        const result = yield* workspaceFileSystem.writeFile({
+          cwd: root,
+          relativePath: "api/src/new.ts",
+          contents: "export const added = true;\n",
+        });
+        const saved = yield* fileSystem
+          .readFileString(path.join(api, "src/new.ts"))
+          .pipe(Effect.orDie);
+
+        expect(result).toEqual({ relativePath: "api/src/new.ts" });
+        expect(saved).toBe("export const added = true;\n");
       }),
     );
 

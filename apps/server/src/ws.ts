@@ -2611,6 +2611,35 @@ const layerWsRpc = (
                 (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
               ),
             ),
+        [WS_METHODS.projectsCreateMultiFolder]: (input) =>
+          managedFolders
+            .createMultiFolderProject(input)
+            .pipe(
+              Effect.mapError(
+                (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+              ),
+            ),
+        [WS_METHODS.projectsListLinkedFolders]: (input) =>
+          managedFolders.linkedFolders(input.projectId).pipe(
+            Effect.map((folders) => ({ folders })),
+            Effect.mapError(
+              (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+            ),
+          ),
+        [WS_METHODS.projectsLinkFolder]: (input) =>
+          managedFolders.linkFolder(input).pipe(
+            Effect.map((folders) => ({ folders })),
+            Effect.mapError(
+              (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+            ),
+          ),
+        [WS_METHODS.projectsUnlinkFolder]: (input) =>
+          managedFolders.unlinkFolder(input).pipe(
+            Effect.map((folders) => ({ folders })),
+            Effect.mapError(
+              (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+            ),
+          ),
         [WS_METHODS.projectCloneCancel]: (input) =>
           projectCloneTracker.cancel(input.projectId).pipe(Effect.map((applied) => ({ applied }))),
         [WS_METHODS.projectCloneRetry]: (input) =>

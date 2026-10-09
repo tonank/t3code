@@ -123,6 +123,27 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
     );
   });
 
+  it.effect("never checkpoints a multi-folder project folder, even inside a repository", () =>
+    Effect.gen(function* () {
+      const tmp = yield* makeTmpDir();
+      yield* initRepoWithCommit(tmp);
+      yield* writeTextFile(NodePath.join(tmp, ".t3-multi-folder"), "");
+      const checkpointStore = yield* CheckpointStore.CheckpointStore;
+
+      expect(yield* checkpointStore.isGitRepository(tmp)).toBe(false);
+
+      const error = yield* checkpointStore
+        .restoreCheckpoint({
+          cwd: tmp,
+          checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-multi-folder"), 0),
+          fallbackToHead: true,
+        })
+        .pipe(Effect.flip);
+
+      expect(error._tag).toBe("VcsUnsupportedOperationError");
+    }),
+  );
+
   it.effect("detects a nested workspace without its own .git entry", () =>
     Effect.gen(function* () {
       const tmp = yield* makeTmpDir();

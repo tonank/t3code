@@ -2690,6 +2690,19 @@ describe("OpenCodeAdapterV2", () => {
     });
   });
 
+  it("treats linked multi-folder members as inside the workspace", () => {
+    const rules = openCodePermissionRules(
+      runtimePolicy("auto-accept-edits", { additionalDirectories: ["/repos/api/"] }),
+    );
+    assert.deepInclude(rules, {
+      permission: "external_directory",
+      pattern: "/repos/api/*",
+      action: "allow",
+    });
+    assert.equal(permissionAction(rules, "external_directory"), "allow");
+    assert.equal(permissionAction(rules, "edit"), "allow");
+  });
+
   it("preserves OpenCode's recursion guard on task-created child sessions", () => {
     const childRules = openCodeChildPermissionRules(runtimePolicy("full-access"), [
       { permission: "task", pattern: "*", action: "deny" },

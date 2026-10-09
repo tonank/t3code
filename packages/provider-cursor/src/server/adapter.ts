@@ -318,6 +318,11 @@ export function makeCursorAgentOptions(input: {
     ...(input.apiKey === undefined ? {} : { apiKey: input.apiKey }),
     local: {
       ...(input.runtimePolicy.cwd === null ? {} : { cwd: input.runtimePolicy.cwd }),
+      // Extra workspace roots, so linked multi-folder members are in the
+      // sandbox's workspace and their project rules load.
+      ...(input.runtimePolicy.additionalDirectories === undefined
+        ? {}
+        : { dirs: [...input.runtimePolicy.additionalDirectories] }),
       autoReview: policy.autoReview,
       settingSources: [...CURSOR_AGENT_SETTING_SOURCES],
       sandboxOptions: {
@@ -840,7 +845,13 @@ interface ActiveCursorTurn {
 interface CursorLiveAgent {
   readonly nativeThreadId: string;
   readonly session: CursorAgentSdk.CursorAgentSdkSession;
+  /** The `local.dirs` the agent was opened with; a different set needs a new agent. */
+  readonly additionalDirectoriesKey: string;
 }
+
+const additionalDirectoriesKey = (
+  runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+): string => JSON.stringify(runtimePolicy.additionalDirectories ?? []);
 
 export interface CursorAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
@@ -2075,10 +2086,13 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           readonly agentId?: string;
         }) {
           const existing = yield* Ref.get(liveAgent);
+          // Workspace roots are fixed when the agent opens, so a folder linked
+          // or unlinked since then means resuming into a fresh agent.
           if (
             existing !== null &&
             openInput.operation === "resume" &&
-            existing.nativeThreadId === openInput.agentId
+            existing.nativeThreadId === openInput.agentId &&
+            existing.additionalDirectoriesKey === additionalDirectoriesKey(openInput.runtimePolicy)
           ) {
             return existing;
           }
@@ -2102,6 +2116,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           const next = {
             nativeThreadId: sdkSession.agentId,
             session: sdkSession,
+            additionalDirectoriesKey: additionalDirectoriesKey(openInput.runtimePolicy),
           } satisfies CursorLiveAgent;
           yield* Ref.set(liveAgent, next);
           return next;

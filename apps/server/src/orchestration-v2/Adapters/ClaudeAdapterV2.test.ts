@@ -269,6 +269,37 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     assert.isUndefined(options.extraArgs?.["dangerously-skip-permissions"]);
   });
 
+  it("grants linked multi-folder members alongside cwd and attachments", () => {
+    const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "native-thread-multi-folder",
+      resume: false,
+      cwd: "/workspace",
+      attachmentsDir: "/attachments",
+      additionalDirectories: ["/repos/api", "/repos/web"],
+    });
+    assert.deepEqual(options.additionalDirectories, [
+      "/workspace",
+      "/attachments",
+      "/repos/api",
+      "/repos/web",
+    ]);
+  });
+
+  it("reopens the live query when the linked folders change", () => {
+    const queryPolicy = ClaudeAdapterV2.claudeRuntimeQueryPolicyForRuntimePolicy(
+      ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: "/workspace",
+      }),
+    );
+    assert.notEqual(
+      ClaudeAdapterV2.claudeEffectiveQueryPolicyKey(queryPolicy, {}, ["/repos/api"]),
+      ClaudeAdapterV2.claudeEffectiveQueryPolicyKey(queryPolicy, {}, ["/repos/api", "/repos/web"]),
+    );
+  });
+
   it("passes automatic compaction and resume-dialog controls to the SDK", () => {
     const onUserDialog = async () => ({
       behavior: "completed" as const,

@@ -538,6 +538,56 @@ export const ProjectCreateNewResult = Schema.Struct({
 });
 export type ProjectCreateNewResult = typeof ProjectCreateNewResult.Type;
 
+/**
+ * A project gathering several folders: a new folder the server makes under
+ * ServerConfig.newProjectsRoot, holding one link per folder.
+ */
+export const ProjectCreateMultiFolderInput = Schema.Struct({
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  folders: Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1)),
+});
+export type ProjectCreateMultiFolderInput = typeof ProjectCreateMultiFolderInput.Type;
+
+export const ProjectCreateMultiFolderResult = Schema.Struct({
+  projectId: ProjectId,
+  workspaceRoot: TrimmedNonEmptyString,
+});
+export type ProjectCreateMultiFolderResult = typeof ProjectCreateMultiFolderResult.Type;
+
+/** One folder of a multi-folder project. */
+export const ProjectLinkedFolder = Schema.Struct({
+  /** Its name inside the project, which is also its path prefix. */
+  name: TrimmedNonEmptyString,
+  /** Where its files live. */
+  path: TrimmedNonEmptyString,
+  /** False for a folder made inside the project rather than linked; it cannot be unlinked. */
+  linked: Schema.Boolean,
+  /** The linked folder no longer exists on disk; removing the link still works. */
+  missing: Schema.optionalKey(Schema.Boolean),
+});
+export type ProjectLinkedFolder = typeof ProjectLinkedFolder.Type;
+
+export const ProjectLinkedFoldersInput = Schema.Struct({ projectId: ProjectId });
+export type ProjectLinkedFoldersInput = typeof ProjectLinkedFoldersInput.Type;
+
+/** `folders` is null when the project is not a multi-folder project. */
+export const ProjectLinkedFoldersResult = Schema.Struct({
+  folders: Schema.NullOr(Schema.Array(ProjectLinkedFolder)),
+});
+export type ProjectLinkedFoldersResult = typeof ProjectLinkedFoldersResult.Type;
+
+export const ProjectLinkFolderInput = Schema.Struct({
+  projectId: ProjectId,
+  folder: TrimmedNonEmptyString,
+});
+export type ProjectLinkFolderInput = typeof ProjectLinkFolderInput.Type;
+
+export const ProjectUnlinkFolderInput = Schema.Struct({
+  projectId: ProjectId,
+  name: TrimmedNonEmptyString,
+});
+export type ProjectUnlinkFolderInput = typeof ProjectUnlinkFolderInput.Type;
+
 export class ProjectWriteFileError extends Schema.TaggedError<ProjectWriteFileError>()(
   "ProjectWriteFileError",
   {

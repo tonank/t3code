@@ -489,6 +489,49 @@ describe("CodexAdapterV2 runtime policy", () => {
     }),
   );
 
+  it.effect("makes linked multi-folder members writable in the workspace sandbox", () =>
+    Effect.gen(function* () {
+      const build = (runtimePolicy: Partial<ProviderAdapter.ProviderAdapterV2RuntimePolicy>) =>
+        CodexAdapterV2.buildCodexTurnStartParams({
+          nativeThreadId: "native-multi-folder",
+          codexInput: [{ type: "text", text: "test" }],
+          runtimePolicy: {
+            runtimeMode: "auto-accept-edits",
+            interactionMode: "default",
+            cwd: "/workspace",
+            additionalDirectories: ["/repos/api", "/repos/web"],
+            ...runtimePolicy,
+          },
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5.4",
+          },
+        });
+
+      const byDefault = yield* build({});
+      assert.deepEqual(byDefault.sandboxPolicy, {
+        type: "workspaceWrite",
+        writableRoots: ["/repos/api", "/repos/web"],
+      });
+
+      const explicit = yield* build({
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          networkAccess: true,
+          writableRoots: ["/extra", "/repos/api"],
+        },
+      });
+      assert.deepEqual(explicit.sandboxPolicy, {
+        type: "workspaceWrite",
+        networkAccess: true,
+        writableRoots: ["/extra", "/repos/api", "/repos/web"],
+      });
+
+      const readOnly = yield* build({ runtimeMode: "approval-required" });
+      assert.deepEqual(readOnly.sandboxPolicy, { type: "readOnly" });
+    }),
+  );
+
   it.effect("adds default-mode developer instructions when the T3 MCP server is attached", () =>
     Effect.gen(function* () {
       const params = yield* CodexAdapterV2.buildCodexTurnStartParams({

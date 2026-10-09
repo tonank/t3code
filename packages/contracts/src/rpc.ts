@@ -217,8 +217,14 @@ import {
   OrchestrationV2ThreadLaunchError,
 } from "./orchestrationV2.ts";
 import {
+  ProjectCreateMultiFolderInput,
+  ProjectCreateMultiFolderResult,
   ProjectCreateNewInput,
   ProjectCreateNewResult,
+  ProjectLinkFolderInput,
+  ProjectLinkedFoldersInput,
+  ProjectLinkedFoldersResult,
+  ProjectUnlinkFolderInput,
   ProjectEnsureScratchResult,
   ProjectListEntriesError,
   ProjectListEntriesInput,
@@ -382,6 +388,10 @@ export const WS_METHODS = {
   projectsMutate: "projects.mutate",
   projectsEnsureScratch: "projects.ensureScratch",
   projectsCreateNew: "projects.createNew",
+  projectsCreateMultiFolder: "projects.createMultiFolder",
+  projectsListLinkedFolders: "projects.listLinkedFolders",
+  projectsLinkFolder: "projects.linkFolder",
+  projectsUnlinkFolder: "projects.unlinkFolder",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -1259,6 +1269,31 @@ const WsProjectsCreateNewRpc = Rpc.make(WS_METHODS.projectsCreateNew, {
   error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
 });
 
+// Makes a folder under ServerConfig.newProjectsRoot linking each folder, then the project.
+const WsProjectsCreateMultiFolderRpc = Rpc.make(WS_METHODS.projectsCreateMultiFolder, {
+  payload: ProjectCreateMultiFolderInput,
+  success: ProjectCreateMultiFolderResult,
+  error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectsListLinkedFoldersRpc = Rpc.make(WS_METHODS.projectsListLinkedFolders, {
+  payload: ProjectLinkedFoldersInput,
+  success: ProjectLinkedFoldersResult,
+  error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectsLinkFolderRpc = Rpc.make(WS_METHODS.projectsLinkFolder, {
+  payload: ProjectLinkFolderInput,
+  success: ProjectLinkedFoldersResult,
+  error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectsUnlinkFolderRpc = Rpc.make(WS_METHODS.projectsUnlinkFolder, {
+  payload: ProjectUnlinkFolderInput,
+  success: ProjectLinkedFoldersResult,
+  error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
+});
+
 const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   payload: LaunchEditorInput,
   error: Schema.Union([ExternalLauncherError, EnvironmentAuthorizationError]),
@@ -1986,6 +2021,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsSearchEntriesRpc,
   WsProjectsEnsureScratchRpc,
   WsProjectsCreateNewRpc,
+  WsProjectsCreateMultiFolderRpc,
+  WsProjectsListLinkedFoldersRpc,
+  WsProjectsLinkFolderRpc,
+  WsProjectsUnlinkFolderRpc,
   WsProjectsWriteFileRpc,
   WsProjectsMutateRpc,
   WsShellOpenInEditorRpc,

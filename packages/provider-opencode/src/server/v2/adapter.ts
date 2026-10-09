@@ -428,7 +428,7 @@ type TurnTerminal =
 type Rule = Permission.Rule;
 type RulesPolicy = Pick<
   ProviderAdapter.ProviderAdapterV2RuntimePolicy,
-  "runtimeMode" | "interactionMode"
+  "runtimeMode" | "interactionMode" | "additionalDirectories"
 >;
 type NativeForm = EventOf<"form.created">["data"]["form"];
 
@@ -508,6 +508,12 @@ const sessionRules = (
         rule("shell", "ask"),
         rule("edit", policy.runtimeMode === "auto-accept-edits" ? "allow" : "ask"),
         rule("external_directory", "ask"),
+        // Linked multi-folder members are part of the workspace, not outside it.
+        ...(policy.additionalDirectories ?? []).map((directory): Rule => ({
+          action: "external_directory",
+          resource: `${directory.replace(/\/$/, "")}/*`,
+          effect: "allow",
+        })),
       ]),
   ...grants,
   // Plan mode writes only its plan, which `paths` allows again. Shell and read

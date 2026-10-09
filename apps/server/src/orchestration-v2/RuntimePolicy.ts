@@ -9,10 +9,12 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as MultiFolderWorkspace from "../workspace/MultiFolderWorkspace.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 
 /**
@@ -87,12 +89,13 @@ function providerRuntimeMode(
 export const layerFromProjectStore: Layer.Layer<
   RuntimePolicyV2,
   never,
-  ProjectStore.ProjectStoreV2 | ProviderInstanceRegistry.ProviderInstanceRegistry
+  ProjectStore.ProjectStoreV2 | ProviderInstanceRegistry.ProviderInstanceRegistry | Path.Path
 > = Layer.effect(
   RuntimePolicyV2,
   Effect.gen(function* () {
     const projects = yield* ProjectStore.ProjectStoreV2;
     const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+    const multiFolder = yield* MultiFolderWorkspace.MultiFolderWorkspace;
     return RuntimePolicyV2.of({
       resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
         const instance = yield* providerInstances.getInstance(input.modelSelection.instanceId);
@@ -125,15 +128,19 @@ export const layerFromProjectStore: Layer.Layer<
               }),
             ),
           ));
+        // Providers check real paths, so linked members of a multi-folder
+        // root must be allowed explicitly for writes through the links.
+        const additionalDirectories = yield* multiFolder.linkedTargets(cwd);
         return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
           interactionMode: input.thread.interactionMode,
           cwd,
+          ...(additionalDirectories.length === 0 ? {} : { additionalDirectories }),
         });
       }),
     });
   }),
-);
+).pipe(Layer.provide(MultiFolderWorkspace.layer));
 
 export function layerWithOverride(
   override: RuntimePolicyV2Override,
@@ -145,9 +152,14 @@ export function layerWithOverride(
       return {
         resolve: (input) =>
           base.resolve(input).pipe(
-            Effect.map((policy) =>
+            Effect.map(({ additionalDirectories, ...policy }) =>
               ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
                 ...policy,
+                // Linked folders belong to the base cwd; a different cwd drops them.
+                ...(additionalDirectories === undefined ||
+                (override.cwd !== undefined && override.cwd !== policy.cwd)
+                  ? {}
+                  : { additionalDirectories }),
                 ...(override.cwd === undefined ? {} : { cwd: override.cwd }),
                 ...(override.approvalPolicy === undefined
                   ? {}

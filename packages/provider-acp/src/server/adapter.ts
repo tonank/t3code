@@ -139,6 +139,8 @@ export interface AcpAdapterV2RuntimeInput {
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
   readonly mcpServers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly acpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
+  /** Real folders beyond `cwd` the agent may use; see the runtime policy field. */
+  readonly additionalDirectories?: ReadonlyArray<string>;
   /** Scoped credentials for terminal fallback when an ACP agent drops `mcpServers`. */
   readonly processEnvironment?: NodeJS.ProcessEnv;
   readonly resumeSessionId?: string;
@@ -263,18 +265,18 @@ export interface AcpAdapterV2Flavor {
    * Opts the session into the ACP client `fs` capability. Agents read and write
    * files themselves under their own permission model unless a flavor sets
    * this. Requests pass the runtime policy guard, then these handlers, which
-   * receive the cwd of the policy active when the request arrives (null when
+   * receive the policy active when the request arrives (its cwd is null when
    * the session has no workspace). Antigravity sets it and confines requests
-   * to that workspace.
+   * to that workspace and its additional directories.
    */
   readonly clientFileSystem?: {
     readonly readTextFile: (
       request: EffectAcpSchema.ReadTextFileRequest,
-      cwd: string | null,
+      policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
     ) => Effect.Effect<EffectAcpSchema.ReadTextFileResponse, EffectAcpErrors.AcpError>;
     readonly writeTextFile: (
       request: EffectAcpSchema.WriteTextFileRequest,
-      cwd: string | null,
+      policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
     ) => Effect.Effect<EffectAcpSchema.WriteTextFileResponse, EffectAcpErrors.AcpError>;
   };
   /**
@@ -1689,6 +1691,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const clientPolicyGrants = makeAcpClientPolicyGrants();
         let latestRuntimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy =
           input.runtimePolicy;
+        // Folders linked into a multi-folder project reach the agent when its
+        // session loads, so a change restarts the runtime at the next turn.
+        const directoriesKey = (policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy) =>
+          JSON.stringify(policy.additionalDirectories ?? []);
+        let runtimeDirectoriesKey = directoriesKey(input.runtimePolicy);
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveAcpTurn | null>(null);
         const activeSessionId = yield* Ref.make<string | null>(null);
@@ -2106,9 +2113,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           onTermination: AcpAdapterV2RuntimeInput["onTermination"] = () =>
             handleRuntimeTerminationAtGeneration(runtimeGeneration),
         ): AcpAdapterV2RuntimeInput => {
+          const { additionalDirectories } = latestRuntimePolicy;
+          runtimeDirectoriesKey = directoriesKey(latestRuntimePolicy);
           return {
             cwd: input.runtimePolicy.cwd ?? process.cwd(),
             runtimePolicy: input.runtimePolicy,
+            ...(additionalDirectories === undefined ? {} : { additionalDirectories }),
             mcpServers: mcpContext.servers,
             acpMcpServers: mcpContext.acpServers,
             ...(mcpContext.processEnvironment === undefined
@@ -5637,12 +5647,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (clientFileSystem !== undefined) {
             yield* targetRuntime.handleReadTextFile((request) =>
               clientPolicyContext.pipe(
-                Effect.flatMap(({ policy }) => clientFileSystem.readTextFile(request, policy.cwd)),
+                Effect.flatMap(({ policy }) => clientFileSystem.readTextFile(request, policy)),
               ),
             );
             yield* targetRuntime.handleWriteTextFile((request) =>
               clientPolicyContext.pipe(
-                Effect.flatMap(({ policy }) => clientFileSystem.writeTextFile(request, policy.cwd)),
+                Effect.flatMap(({ policy }) => clientFileSystem.writeTextFile(request, policy)),
               ),
             );
           }
@@ -6892,6 +6902,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             // Install the incoming thread policy before load/resume so those
             // requests can never inherit the previously active thread's policy.
             latestRuntimePolicy = turnInput.runtimePolicy;
+            if (directoriesKey(turnInput.runtimePolicy) !== runtimeDirectoriesKey) {
+              yield* Ref.set(runtimeRestartRequired, true);
+            }
             const requestedSessionId = yield* nativeThreadId(driver, turnInput.providerThread);
             const restartAfterInterrupt = yield* restartRuntimeAfterTeardownIfRequired(
               turnInput.threadId,

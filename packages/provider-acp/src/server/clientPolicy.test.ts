@@ -175,6 +175,34 @@ describe("acpPermissionDisposition", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("allows edits through links to the policy's additional directories", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspace = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-acp-permission-workspace-",
+      });
+      const member = yield* fileSystem.realPath(
+        yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-acp-permission-member-" }),
+      );
+      yield* fileSystem.symlink(member, path.join(workspace, "api"));
+
+      const policy: AcpRuntimePolicy = {
+        runtimeMode: "full-access",
+        cwd: workspace,
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "workspaceWrite", writableRoots: [], networkAccess: false },
+      };
+      const request = permissionRequest("edit", [{ path: "api/src/new-file.ts" }]);
+
+      assert.equal(acpPermissionDisposition(policy, request), "deny");
+      assert.equal(
+        acpPermissionDisposition({ ...policy, additionalDirectories: [member] }, request),
+        "allow",
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("allows existing and new files beneath canonical writable roots", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

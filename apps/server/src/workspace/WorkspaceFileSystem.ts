@@ -30,6 +30,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import * as MultiFolderWorkspace from "./MultiFolderWorkspace.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import { fileHeaderMimeType } from "./fileHeaderMimeType.ts";
@@ -148,6 +149,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+  const multiFolderWorkspace = yield* MultiFolderWorkspace.MultiFolderWorkspace;
 
   const metadataForPath = Effect.fnUntraced(function* (requestedPath: string) {
     const expandedPath = expandHomePath(requestedPath, yield* HostProcess.HomeDirectory);
@@ -196,8 +198,9 @@ export const make = Effect.gen(function* () {
 
   /**
    * Resolves the file a read targets. Workspace-relative paths must stay inside the
-   * root, symlinks included. An absolute path reads a host file in place, such as a
-   * report an agent wrote to a temp directory; it gets no root check.
+   * root, symlinks included; a multi-folder root also admits its linked members'
+   * folders. An absolute path reads a host file in place, such as a report an
+   * agent wrote to a temp directory; it gets no root check.
    */
   const resolveReadTarget = Effect.fn("WorkspaceFileSystem.resolveReadTarget")(function* (
     input: ProjectReadFileInput,
@@ -248,11 +251,17 @@ export const make = Effect.gen(function* () {
           cause,
         }),
     });
-    const relativeRealPath = path.relative(realWorkspaceRoot, realTargetPath);
+    const isInside = (realRoot: string) => {
+      const relativeRealPath = path.relative(realRoot, realTargetPath);
+      return !(
+        relativeRealPath.startsWith(`..${path.sep}`) ||
+        relativeRealPath === ".." ||
+        path.isAbsolute(relativeRealPath)
+      );
+    };
     if (
-      relativeRealPath.startsWith(`..${path.sep}`) ||
-      relativeRealPath === ".." ||
-      path.isAbsolute(relativeRealPath)
+      !isInside(realWorkspaceRoot) &&
+      !(yield* multiFolderWorkspace.linkedTargets(input.cwd)).some(isInside)
     ) {
       return yield* new WorkspaceFilePathEscapeError({
         workspaceRoot: input.cwd,
@@ -398,4 +407,6 @@ export const make = Effect.gen(function* () {
   return WorkspaceFileSystem.of({ getMetadata, readFile, writeFile });
 });
 
-export const layer = Layer.effect(WorkspaceFileSystem, make);
+export const layer = Layer.effect(WorkspaceFileSystem, make).pipe(
+  Layer.provide(MultiFolderWorkspace.layer),
+);

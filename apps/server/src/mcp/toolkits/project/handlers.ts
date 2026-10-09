@@ -52,6 +52,24 @@ const access = Effect.gen(function* () {
   yield* readCaller();
   return yield* Project.ProjectService;
 });
+/** Folder paths the agent got wrong are its to fix; a missing project or a filesystem failure is not. */
+const multiFolderFailure = (error: ManagedProjectFolders.MultiFolderProjectError) =>
+  new OrchestratorMcpFailure({
+    code:
+      error._tag === "ManagedProjectNotFoundError" ||
+      (error._tag === "MultiFolderWorkspaceError" &&
+        (error.reason === "not-multi-folder" ||
+          error.reason === "target-missing" ||
+          error.reason === "target-not-absolute" ||
+          error.reason === "target-not-folder" ||
+          error.reason === "target-contains-root" ||
+          error.reason === "target-inside-root" ||
+          error.reason === "member-not-linked"))
+        ? "invalid_request"
+        : "orchestration_error",
+    message: error.message,
+  });
+
 export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   t3_thread_launch: McpToolAccess.startsThreads(
     (input) => input,
@@ -203,12 +221,45 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           code: "invalid_request",
           message: "The project was not found.",
         });
-      return result.value;
+      // Listing a multi-folder project's folders needs no write access.
+      const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+      const linkedFolders = yield* folders
+        .linkedFolders(input.projectId)
+        .pipe(Effect.orElseSucceed(() => null));
+      return {
+        ...result.value,
+        ...(linkedFolders === null ? {} : { linkedFolders }),
+      };
     }),
   ),
-  t3_project_create: McpToolAccess.writesEnvironment(({ workspaceRoot, ...input }) =>
+  t3_project_create: McpToolAccess.writesEnvironment(({ workspaceRoot, linkedFolders, ...input }) =>
     Effect.gen(function* () {
       const projects = yield* Project.ProjectService;
+      if (linkedFolders !== undefined) {
+        if (
+          workspaceRoot !== undefined ||
+          input.scripts !== undefined ||
+          input.createWorkspaceRootIfMissing !== undefined ||
+          input.defaultModelSelection !== undefined
+        )
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message:
+              "A multi-folder project takes only a title and linkedFolders; set scripts or defaultModelSelection afterwards with t3_project_update.",
+          });
+        const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+        const created = yield* folders
+          .createMultiFolderProject({ name: input.title, folders: linkedFolders })
+          .pipe(Effect.mapError(multiFolderFailure));
+        return yield* projects
+          .getById(created.projectId)
+          .pipe(
+            Effect.mapError(unavailable),
+            Effect.flatMap(
+              Option.match({ onNone: () => Effect.fail(unavailable()), onSome: Effect.succeed }),
+            ),
+          );
+      }
       if (workspaceRoot === undefined) {
         // Project creation records no model default (only an update does), so
         // reject what this mode would otherwise drop silently.
@@ -248,6 +299,25 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       return yield* projects
         .create({ ...input, workspaceRoot, commandId, projectId: ProjectId.make(commandId) })
         .pipe(Effect.mapError(projectFailure));
+    }),
+  ),
+  t3_project_folders: McpToolAccess.writesEnvironment((input) =>
+    Effect.gen(function* () {
+      const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+      const toFailure = multiFolderFailure;
+      for (const folder of input.link ?? []) {
+        yield* folders
+          .linkFolder({ projectId: input.projectId, folder })
+          .pipe(Effect.mapError(toFailure));
+      }
+      for (const name of input.unlink ?? []) {
+        yield* folders
+          .unlinkFolder({ projectId: input.projectId, name })
+          .pipe(Effect.mapError(toFailure));
+      }
+      return {
+        folders: yield* folders.linkedFolders(input.projectId).pipe(Effect.mapError(toFailure)),
+      };
     }),
   ),
   t3_project_update: McpToolAccess.writesEnvironment((input) =>

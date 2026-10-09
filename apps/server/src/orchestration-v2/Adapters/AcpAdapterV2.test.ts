@@ -764,6 +764,82 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.live("restarts the ACP runtime with folders linked since the session opened", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const selfInvocation = yield* resolveSelfInvocation();
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const instanceId = ProviderInstanceId.make("acp-test-linked-folders");
+      const threadId = ThreadId.make("thread-acp-linked-folders");
+      const runtimeInputs: Array<AcpAdapterV2RuntimeInput> = [];
+      const makeRuntime = makeMockRuntime({ childProcessSpawner, mockAgentPath });
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          makeRuntime: (input) =>
+            Effect.sync(() => {
+              runtimeInputs.push(input);
+            }).pipe(Effect.andThen(makeRuntime(input))),
+        },
+        selfInvocation,
+      });
+      const policy = (additionalDirectories?: ReadonlyArray<string>) =>
+        ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+          ...(additionalDirectories === undefined ? {} : { additionalDirectories }),
+        });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-acp-linked-folders"),
+        modelSelection,
+        runtimePolicy: policy(),
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy: policy(),
+      });
+      const now = yield* DateTime.now;
+      const runTurn = Effect.fnUntraced(function* (
+        ordinal: number,
+        runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+      ) {
+        yield* runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now,
+            ordinal,
+            messageText: `Turn ${ordinal}`,
+          }),
+        );
+        yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+      });
+
+      yield* runTurn(0, policy());
+      const started = runtimeInputs.length;
+      yield* runTurn(1, policy());
+      assert.equal(runtimeInputs.length, started, "an unchanged folder set keeps the runtime");
+
+      yield* runTurn(2, policy(["/repos/api"]));
+      assert.equal(runtimeInputs.length, started + 1);
+      assert.deepEqual(runtimeInputs.at(-1)?.additionalDirectories, ["/repos/api"]);
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.live("refreshes ACP prompt instructions when the interaction mode changes", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;

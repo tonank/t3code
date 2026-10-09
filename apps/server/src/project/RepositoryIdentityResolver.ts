@@ -11,6 +11,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
 import * as ProcessRunner from "../processRunner.ts";
+import { isMultiFolderRoot } from "../workspace/MultiFolderWorkspace.ts";
 
 const DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY = 512;
 // Background sweeps resolve every project each minute. A long TTL keeps them
@@ -118,6 +119,11 @@ function buildRepositoryIdentity(input: {
 const resolveRepositoryIdentityCacheKey = Effect.fn("RepositoryIdentityResolver.resolveCacheKey")(
   function* (cwd: string) {
     const processRunner = yield* ProcessRunner.ProcessRunner;
+
+    // A multi-folder project's folder is not part of a repository that happens
+    // to contain it (a T3 home inside a checkout); grouping it under that
+    // repository would merge every such project into one.
+    if (yield* Effect.promise(() => isMultiFolderRoot(cwd))) return null;
 
     // git is a real executable on every platform — no cmd.exe shell mode, which
     // would split paths containing spaces during cmd's re-tokenization.

@@ -22,6 +22,7 @@ import * as ServerConfig from "../../../config.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as MultiFolderWorkspace from "../../../workspace/MultiFolderWorkspace.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -298,6 +299,101 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
       expect(rejected.at(-1)?.result).toMatchObject({ code: "invalid_request" });
     }
     expect(named).toEqual(["Pinball Stats"]);
+  }),
+);
+
+it.effect("reads a multi-folder project's folders and reports a bad folder as the agent's", () =>
+  Effect.gen(function* () {
+    const sourceThreadId = ThreadId.make("source-thread");
+    const projectId = ProjectId.make("project:storefront");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const caller = {
+      id: sourceThreadId,
+      projectId,
+      providerInstanceId,
+      modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      activeRunId: "active-run",
+      archivedAt: null,
+      deletedAt: null,
+    } as OrchestrationV2ThreadShell;
+    const project = {
+      id: projectId,
+      title: "Storefront",
+      workspaceRoot: "/projects/storefront",
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: "2026-10-01T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+      deletedAt: null,
+    };
+    const folders = [{ name: "api", path: "/repos/api", linked: true }];
+    const layerDependencies = Layer.mergeAll(
+      NodeCrypto.layer,
+      Layer.succeed(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("environment"),
+        requestNamespace: "session",
+        thread: {
+          threadId: sourceThreadId,
+          providerSessionId: "session",
+          providerInstanceId,
+        },
+        client: undefined,
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+      }),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: () => Effect.succeed(caller),
+      }),
+      Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+      Layer.mock(Project.ProjectService)({
+        getById: (id) => Effect.succeed(id === projectId ? Option.some(project) : Option.none()),
+      }),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/projects",
+        linkedFolders: (id) => Effect.succeed(id === projectId ? folders : null),
+        linkFolder: (input) =>
+          Effect.fail(
+            new MultiFolderWorkspace.MultiFolderWorkspaceError({
+              root: project.workspaceRoot,
+              reason: "target-missing",
+              path: input.folder,
+            }),
+          ),
+      }),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      NodeServices.layer,
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-project-folders-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+    );
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(layerDependencies),
+        ),
+      ),
+    );
+    const handle = <Name extends "t3_project_read" | "t3_project_folders">(
+      name: Name,
+      params: Parameters<typeof toolkit.handle<Name>>[1],
+    ) =>
+      toolkit
+        .handle(name, params)
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+
+    const read = yield* handle("t3_project_read", { projectId });
+    expect(read.at(-1)?.result).toMatchObject({ id: projectId, linkedFolders: folders });
+
+    const failed = yield* handle("t3_project_folders", {
+      projectId,
+      link: ["/repos/missing"],
+    });
+    expect(failed.at(-1)?.result).toMatchObject({
+      code: "invalid_request",
+      message: "The folder to link does not exist: /repos/missing",
+    });
   }),
 );
 

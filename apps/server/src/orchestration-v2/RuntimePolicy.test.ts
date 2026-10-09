@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   type ModelSelection,
@@ -10,12 +11,15 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as MultiFolderWorkspace from "../workspace/MultiFolderWorkspace.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 
@@ -77,6 +81,7 @@ const providerInstanceFor = (instanceId: ProviderInstanceId) =>
   }) as ProviderInstance;
 
 const layerTest = RuntimePolicy.layerFromProjectStore.pipe(
+  Layer.provideMerge(MultiFolderWorkspace.layer),
   Layer.provide(
     Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
       getInstance: (instanceId) => Effect.succeed(providerInstanceFor(instanceId)),
@@ -107,6 +112,7 @@ const layerTest = RuntimePolicy.layerFromProjectStore.pipe(
         ),
     }),
   ),
+  Layer.provideMerge(NodeServices.layer),
 );
 
 it.layer(layerTest)("RuntimePolicyV2", (it) => {
@@ -152,5 +158,49 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
       // A provider that advertises no restriction runs every mode as stored.
       assert.equal(yield* modeFor(providerInstanceId, "auto-accept-edits"), "auto-accept-edits");
     }),
+  );
+
+  it.effect("allows the real folders linked into a multi-folder root", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspace = yield* MultiFolderWorkspace.MultiFolderWorkspace;
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      const now = yield* DateTime.now;
+      const base = yield* fileSystem.realPath(
+        yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3code-runtime-policy-" }),
+      );
+      const root = path.join(base, "project");
+      const api = path.join(base, "api");
+      yield* fileSystem.makeDirectory(api);
+      yield* workspace.initialize(root);
+      yield* workspace.link({ root, target: api });
+
+      const multiFolder = yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: root }),
+        modelSelection,
+      });
+      assert.deepEqual(multiFolder.additionalDirectories, [api]);
+
+      const plain = yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: api }),
+        modelSelection,
+      });
+      assert.isUndefined(plain.additionalDirectories);
+
+      // An override that moves the turn elsewhere leaves the root's links behind.
+      const resolveOverridden = (override: RuntimePolicy.RuntimePolicyV2Override) =>
+        RuntimePolicy.RuntimePolicyV2.pipe(
+          Effect.flatMap((overridden) =>
+            overridden.resolve({ thread: makeThread({ now, worktreePath: root }), modelSelection }),
+          ),
+          Effect.provide(RuntimePolicy.layerWithOverride(override)),
+        );
+      assert.deepEqual(
+        (yield* resolveOverridden({ approvalPolicy: "never" })).additionalDirectories,
+        [api],
+      );
+      assert.isUndefined((yield* resolveOverridden({ cwd: api })).additionalDirectories);
+    }).pipe(Effect.scoped),
   );
 });

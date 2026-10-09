@@ -5,7 +5,8 @@
  * - `<baseDir>/scratch`: the Scratch project ("No project"), with a folder of
  *   its own for each thread;
  * - `<baseDir>/projects/<slug>`: projects started from just a name, each a new
- *   Git repository with a README, an icon, and a first commit.
+ *   Git repository with a README, an icon, and a first commit, and
+ *   multi-folder projects, each a folder of links to the folders it gathers.
  *
  * @module ManagedProjectFolders
  */
@@ -34,6 +35,7 @@ import * as Schema from "effect/Schema";
 import * as ServerConfig from "../config.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as MultiFolderWorkspace from "../workspace/MultiFolderWorkspace.ts";
 import * as ProjectService from "./ProjectService.ts";
 
 export class ScratchUnavailableError extends Schema.TaggedError<ScratchUnavailableError>()(
@@ -97,6 +99,29 @@ export class NamedProjectCreateError extends Schema.TaggedError<NamedProjectCrea
 
 export type NamedProjectError = NamedProjectFolderError | NamedProjectCreateError;
 
+export class ManagedProjectNotFoundError extends Schema.TaggedError<ManagedProjectNotFoundError>()(
+  "ManagedProjectNotFoundError",
+  { projectId: Schema.String },
+) {
+  override get message(): string {
+    return "The project no longer exists.";
+  }
+}
+
+export type MultiFolderProjectError =
+  | NamedProjectError
+  | ManagedProjectNotFoundError
+  | ProjectService.ProjectOperationError
+  | MultiFolderWorkspace.MultiFolderWorkspaceError;
+
+export interface LinkedFolder {
+  readonly name: string;
+  readonly path: string;
+  readonly linked: boolean;
+  /** The linked folder no longer exists; it is listed so it can be removed. */
+  readonly missing?: boolean;
+}
+
 export class ManagedProjectFolders extends Context.Service<
   ManagedProjectFolders,
   {
@@ -131,6 +156,31 @@ export class ManagedProjectFolders extends Context.Service<
       },
       NamedProjectError
     >;
+    /**
+     * Starts a multi-folder project: claims `<namedProjectsRoot>/<slug>` like
+     * `createNamedProject`, links each folder into it, then creates the
+     * project. The folder is removed when any step before the create fails.
+     */
+    readonly createMultiFolderProject: (input: {
+      readonly name: string;
+      readonly folders: ReadonlyArray<string>;
+    }) => Effect.Effect<
+      { readonly projectId: ProjectId; readonly workspaceRoot: string },
+      MultiFolderProjectError
+    >;
+    /** A project's folders, or null when it is not a multi-folder project. */
+    readonly linkedFolders: (
+      projectId: ProjectId,
+    ) => Effect.Effect<ReadonlyArray<LinkedFolder> | null, MultiFolderProjectError>;
+    readonly linkFolder: (input: {
+      readonly projectId: ProjectId;
+      readonly folder: string;
+    }) => Effect.Effect<ReadonlyArray<LinkedFolder> | null, MultiFolderProjectError>;
+    /** Removes a link; the folder it pointed at is untouched. */
+    readonly unlinkFolder: (input: {
+      readonly projectId: ProjectId;
+      readonly name: string;
+    }) => Effect.Effect<ReadonlyArray<LinkedFolder> | null, MultiFolderProjectError>;
   }
 >()("t3/project/ManagedProjectFolders") {}
 
@@ -243,6 +293,7 @@ const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const projects = yield* ProjectService.ProjectService;
   const crypto = yield* Crypto.Crypto;
+  const multiFolder = yield* MultiFolderWorkspace.MultiFolderWorkspace;
 
   /**
    * Claims the first free folder among `folderFor(1)`, `folderFor(2)`, ...,
@@ -515,13 +566,112 @@ const make = Effect.gen(function* () {
     };
   });
 
+  const createMultiFolderProject: ManagedProjectFolders["Service"]["createMultiFolderProject"] =
+    Effect.fn("ManagedProjectFolders.createMultiFolderProject")(function* (input) {
+      const workspaceRoot = yield* claimNamedFolder(input.name);
+      // Linking validates every folder, so a bad one fails before the project
+      // exists and leaves nothing behind. Each link is removed on its own,
+      // never through a recursive remove that could reach the folders behind
+      // links or junctions, and the folder goes only once it is empty.
+      const removeFolder = multiFolder.members(workspaceRoot).pipe(
+        Effect.flatMap((members) =>
+          Effect.forEach(members ?? [], (member) =>
+            member.linkTarget === null
+              ? Effect.void
+              : multiFolder.unlink({ root: workspaceRoot, name: member.name }),
+          ),
+        ),
+        Effect.andThen(multiFolder.dispose(workspaceRoot)),
+        Effect.ignore,
+      );
+      const id = yield* Effect.gen(function* () {
+        yield* multiFolder.initialize(workspaceRoot);
+        for (const folder of input.folders) {
+          yield* multiFolder.link({ root: workspaceRoot, target: folder });
+        }
+        return yield* crypto.randomUUIDv4.pipe(
+          Effect.mapError((cause) => new NamedProjectCreateError({ workspaceRoot, cause })),
+        );
+      }).pipe(Effect.onExit((exit) => (Exit.isSuccess(exit) ? Effect.void : removeFolder)));
+      const project = yield* projects
+        .create({
+          commandId: CommandId.make(`multi-folder-project:${id}`),
+          projectId: ProjectId.make(id),
+          title: input.name,
+          workspaceRoot,
+        })
+        .pipe(
+          // Same rule as a named project: remove the folder only when no
+          // project owns it.
+          Effect.tapError((error) =>
+            error._tag === "ProjectConflictError"
+              ? Effect.void
+              : projects.getByWorkspaceRoot(workspaceRoot).pipe(
+                  Effect.flatMap((owner) => (Option.isNone(owner) ? removeFolder : Effect.void)),
+                  Effect.ignore,
+                ),
+          ),
+          Effect.mapError((cause) => new NamedProjectCreateError({ workspaceRoot, cause })),
+        );
+      return { projectId: project.id, workspaceRoot };
+    });
+
+  const projectRoot = (projectId: ProjectId) =>
+    projects.getById(projectId).pipe(
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.fail(new ManagedProjectNotFoundError({ projectId })),
+          onSome: (project) => Effect.succeed(project.workspaceRoot),
+        }),
+      ),
+    );
+
+  const foldersOf = (root: string) =>
+    multiFolder.members(root).pipe(
+      Effect.map((members) =>
+        members === null
+          ? null
+          : members.map((member): LinkedFolder => ({
+              name: member.name,
+              path: member.linkTarget ?? member.path,
+              linked: member.linkTarget !== null,
+              ...(member.missing ? { missing: true } : {}),
+            })),
+      ),
+    );
+
+  const linkedFolders: ManagedProjectFolders["Service"]["linkedFolders"] = (projectId) =>
+    projectRoot(projectId).pipe(Effect.flatMap(foldersOf));
+
+  const linkFolder: ManagedProjectFolders["Service"]["linkFolder"] = Effect.fn(
+    "ManagedProjectFolders.linkFolder",
+  )(function* (input) {
+    const root = yield* projectRoot(input.projectId);
+    yield* multiFolder.link({ root, target: input.folder });
+    return yield* foldersOf(root);
+  });
+
+  const unlinkFolder: ManagedProjectFolders["Service"]["unlinkFolder"] = Effect.fn(
+    "ManagedProjectFolders.unlinkFolder",
+  )(function* (input) {
+    const root = yield* projectRoot(input.projectId);
+    yield* multiFolder.unlink({ root, name: input.name });
+    return yield* foldersOf(root);
+  });
+
   return ManagedProjectFolders.of({
     scratchRoot,
     ensureScratchProject,
     folderForThread,
     namedProjectsRoot,
     createNamedProject,
+    createMultiFolderProject,
+    linkedFolders,
+    linkFolder,
+    unlinkFolder,
   });
 });
 
-export const layer = Layer.effect(ManagedProjectFolders, make);
+export const layer = Layer.effect(ManagedProjectFolders, make).pipe(
+  Layer.provide(MultiFolderWorkspace.layer),
+);

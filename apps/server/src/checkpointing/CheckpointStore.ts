@@ -21,6 +21,7 @@ import * as Layer from "effect/Layer";
 import type { CheckpointStoreError } from "./Errors.ts";
 import type { VcsCheckpointOps } from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import { isMultiFolderRoot } from "../workspace/MultiFolderWorkspace.ts";
 
 export interface CaptureCheckpointInput {
   readonly cwd: string;
@@ -161,6 +162,17 @@ export const make = Effect.gen(function* () {
     "restoreCheckpoint",
   )(function* (input) {
     const checkpoints = yield* resolveCheckpoints("CheckpointStore.restoreCheckpoint", input.cwd);
+    // Detection already refuses a multi-folder root; this guards a driver
+    // resolved another way, since a restore's `git clean` would sweep every
+    // linked folder on Windows and remove the links elsewhere.
+    if (yield* Effect.promise(() => isMultiFolderRoot(input.cwd))) {
+      return yield* new VcsUnsupportedOperationError({
+        operation: "CheckpointStore.restoreCheckpoint",
+        kind: "git",
+        detail:
+          "This project folder links other folders; restore a checkpoint in one of them instead.",
+      });
+    }
     return yield* checkpoints.restoreCheckpoint(input);
   });
 

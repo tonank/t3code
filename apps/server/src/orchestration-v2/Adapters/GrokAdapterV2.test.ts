@@ -445,6 +445,7 @@ describe("Grok launch permission mode", () => {
                   } as ProviderInstance),
               }),
             ),
+            Layer.provide(NodeServices.layer),
           ),
         ),
       );

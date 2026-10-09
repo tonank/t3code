@@ -603,3 +603,136 @@ it.effect("removes the folder when the repository cannot be made", () =>
     },
   ),
 );
+
+it.effect("starts a multi-folder project from linked folders and manages its links", () =>
+  withScratch(({ baseDir }) =>
+    Effect.gen(function* () {
+      const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+      const projects = yield* ProjectService.ProjectService;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const realBase = yield* fileSystem.realPath(baseDir);
+      const api = path.join(realBase, "code", "api");
+      const web = path.join(realBase, "code", "web");
+      const docs = path.join(realBase, "code", "docs");
+      for (const folder of [api, web, docs]) {
+        yield* fileSystem.makeDirectory(folder, { recursive: true });
+      }
+
+      const created = yield* folders.createMultiFolderProject({
+        name: "Storefront",
+        folders: [api, web],
+      });
+
+      assert.equal(created.workspaceRoot, path.resolve(baseDir, "projects", "storefront"));
+      const project = Option.getOrThrow(yield* projects.getById(created.projectId));
+      assert.equal(project.title, "Storefront");
+      assert.deepEqual(yield* folders.linkedFolders(created.projectId), [
+        { name: "api", path: api, linked: true },
+        { name: "web", path: web, linked: true },
+      ]);
+
+      const linked = yield* folders.linkFolder({ projectId: created.projectId, folder: docs });
+      assert.deepEqual(
+        linked?.map((folder) => folder.name),
+        ["api", "docs", "web"],
+      );
+      const unlinked = yield* folders.unlinkFolder({ projectId: created.projectId, name: "web" });
+      assert.deepEqual(
+        unlinked?.map((folder) => folder.name),
+        ["api", "docs"],
+      );
+      // Unlinking never touches the folder itself.
+      assert.isTrue(yield* fileSystem.exists(web));
+
+      // A folder deleted behind the project stays listed, flagged, until it is removed.
+      yield* fileSystem.remove(docs, { recursive: true });
+      assert.deepEqual(yield* folders.linkedFolders(created.projectId), [
+        { name: "api", path: api, linked: true },
+        { name: "docs", path: docs, linked: true, missing: true },
+      ]);
+      const cleaned = yield* folders.unlinkFolder({ projectId: created.projectId, name: "docs" });
+      assert.deepEqual(
+        cleaned?.map((folder) => folder.name),
+        ["api"],
+      );
+    }),
+  ),
+);
+
+it.effect("leaves nothing behind when a multi-folder project names a missing folder", () =>
+  withScratch(({ baseDir }) =>
+    Effect.gen(function* () {
+      const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+      const projects = yield* ProjectService.ProjectService;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const api = path.join(baseDir, "api");
+      yield* fileSystem.makeDirectory(api);
+      yield* fileSystem.writeFileString(path.join(api, "keep.txt"), "kept");
+
+      const failure = yield* Effect.flip(
+        folders.createMultiFolderProject({
+          name: "Broken",
+          folders: [api, path.join(baseDir, "missing")],
+        }),
+      );
+
+      assert.equal(failure._tag, "MultiFolderWorkspaceError");
+      assert.deepEqual(yield* fileSystem.readDirectory(path.resolve(baseDir, "projects")), []);
+      assert.deepEqual((yield* projects.snapshot).projects, []);
+      // The folder linked before the failure keeps its files.
+      assert.equal(yield* fileSystem.readFileString(path.join(api, "keep.txt")), "kept");
+    }),
+  ),
+);
+
+it.effect("removes a multi-folder project's folder when the project create is rejected", () =>
+  withScratch(
+    ({ baseDir }) =>
+      Effect.gen(function* () {
+        const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const api = path.join(yield* fileSystem.realPath(baseDir), "api");
+        yield* fileSystem.makeDirectory(api);
+        yield* fileSystem.writeFileString(path.join(api, "keep.txt"), "kept");
+
+        const failure = yield* Effect.flip(
+          folders.createMultiFolderProject({ name: "Rejected", folders: [api] }),
+        );
+
+        assert.equal(failure._tag, "NamedProjectCreateError");
+        assert.deepEqual(yield* fileSystem.readDirectory(path.resolve(baseDir, "projects")), []);
+        assert.equal(yield* fileSystem.readFileString(path.join(api, "keep.txt")), "kept");
+      }),
+    {
+      projects: (real) =>
+        ProjectService.ProjectService.of({
+          ...real,
+          create: (input) =>
+            Effect.fail(
+              new ProjectService.ProjectOperationError({
+                operation: "dispatch-project-command",
+                projectId: input.projectId,
+                cause: "store unavailable",
+              }),
+            ),
+        }),
+    },
+  ),
+);
+
+it.effect("reports a plain project as having no linked folders", () =>
+  withScratch(() =>
+    withGitEnv(
+      TEST_IDENTITY,
+      Effect.gen(function* () {
+        const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+        const created = yield* folders.createNamedProject({ name: "Plain" });
+
+        assert.isNull(yield* folders.linkedFolders(created.projectId));
+      }),
+    ),
+  ),
+);

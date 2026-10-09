@@ -778,6 +778,132 @@ describe("CursorAdapterV2", () => {
     ),
   );
 
+  it.effect("resumes into a new agent when the linked folders change between turns", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-dirs-" });
+      const instanceId = ProviderInstanceId.make("cursor");
+      const threadId = ThreadId.make("cursor-dirs-thread");
+      const modelSelection = { instanceId, model: "composer-2.5" };
+      const policyFor = (additionalDirectories?: ReadonlyArray<string>) =>
+        ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: workspace,
+          ...(additionalDirectories === undefined ? {} : { additionalDirectories }),
+        });
+      const openedDirs: Array<ReadonlyArray<string> | undefined> = [];
+      const adapter = yield* makeCursorAdapterV2({
+        instanceId,
+        settings: yield* decodeCursorSettings({}),
+        environment: { HOME: workspace },
+      }).pipe(
+        Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
+          assertComplete: Effect.void,
+          open: (input) =>
+            Effect.sync(() => {
+              openedDirs.push(input.options.local?.dirs);
+              return {
+                agentId: "native-cursor-dirs",
+                listMessages: Effect.succeed([]),
+                close: Effect.void,
+                send: () =>
+                  Effect.succeed({
+                    agentId: "native-cursor-dirs",
+                    runId: "native-cursor-run",
+                    wait: Effect.succeed({
+                      id: "native-cursor-run",
+                      requestId: "native-request",
+                      status: "finished" as const,
+                      model: { id: "composer-2.5" },
+                      durationMs: 1,
+                    }),
+                    cancel: Effect.void,
+                  }),
+              };
+            }),
+        }),
+        Effect.provide(TestProviderHost.layer({ cwd: workspace })),
+      );
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("cursor-dirs-session"),
+        modelSelection,
+        runtimePolicy: policyFor(),
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy: policyFor(),
+      });
+      const now = yield* DateTime.now;
+      const turn = (
+        ordinal: number,
+        runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+      ) =>
+        Effect.gen(function* () {
+          yield* runtime.startTurn({
+            threadId,
+            providerThread,
+            modelSelection,
+            runtimePolicy,
+            runId: RunId.make(`cursor-dirs-run-${ordinal}`),
+            runOrdinal: ordinal,
+            providerTurnOrdinal: ordinal,
+            attemptId: RunAttemptId.make(`cursor-dirs-attempt-${ordinal}`),
+            rootNodeId: NodeId.make(`cursor-dirs-root-${ordinal}`),
+            appThread: {
+              id: threadId,
+              projectId: ProjectId.make("cursor-dirs-project"),
+              createdBy: "user",
+              creationSource: "web",
+              title: "Cursor linked folders",
+              providerInstanceId: instanceId,
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              activeProviderThreadId: providerThread.id,
+              lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+              archivedAt: null,
+              settledOverride: null,
+              settledAt: null,
+              lastVisitedAt: null,
+              deletedAt: null,
+            },
+            message: {
+              messageId: MessageId.make(`cursor-dirs-message-${ordinal}`),
+              createdBy: "user",
+              creationSource: "web",
+              text: "hello",
+              attachments: [],
+            },
+          });
+          yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runDrain,
+          );
+        });
+
+      yield* turn(1, policyFor());
+      yield* turn(2, policyFor(["/repos/api"]));
+      yield* turn(3, policyFor(["/repos/api"]));
+
+      // The first turn opens the agent; linking a folder reopens it with the new
+      // workspace roots; an unchanged set reuses it.
+      assert.deepEqual(openedDirs, [undefined, ["/repos/api"]]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
+      ),
+    ),
+  );
+
   it("maps Cursor auto and model parameters to SDK selections", () => {
     assert.deepEqual(
       cursorSdkModelSelection({
@@ -859,6 +985,22 @@ describe("CursorAdapterV2", () => {
         sandboxEnabled: false,
       },
     );
+  });
+
+  it("adds linked multi-folder members as workspace folders", () => {
+    const options = makeCursorAgentOptions({
+      modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "composer-2.5" },
+      runtimePolicy: {
+        runtimeMode: "auto-accept-edits",
+        interactionMode: "default",
+        cwd: "/workspace",
+        additionalDirectories: ["/repos/api"],
+      },
+      threadId: ThreadId.make("thread-cursor-multi-folder"),
+      mcpSession: undefined,
+    });
+    assert.equal(options.local?.cwd, "/workspace");
+    assert.deepEqual(options.local?.dirs, ["/repos/api"]);
   });
 
   it("loads the user's Cursor settings layers in every runtime mode", () => {
