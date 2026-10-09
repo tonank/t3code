@@ -3,12 +3,23 @@ import { AppText as Text, AppTextInput } from "../../components/AppText";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-grouping";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
+import type { ProjectLinkedFolder } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import { useNavigation } from "@react-navigation/native";
+import * as Cause from "effect/Cause";
+import { AsyncResult } from "effect/reactivity";
 import { useState } from "react";
-import { Platform, Pressable, View } from "react-native";
+import { Alert, Platform, Pressable, View } from "react-native";
+import { fileBasename } from "@t3tools/shared/path";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { SymbolView } from "../../components/AppSymbol";
+import { ListRowLayout } from "../../components/ListRowLayout";
 import { projectEnvironment } from "../../state/projects";
+import { useEnvironmentQuery } from "../../state/query";
+import { useEnvironmentServerConfig } from "../../state/entities";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { SettingsActionRow } from "./components/SettingsActionRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
 import {
@@ -62,6 +73,9 @@ function ProjectOverviewContent(props: {
 }) {
   const representative = props.members[0]!;
   const displayName = deriveProjectGroupLabel({ representative, members: props.members });
+  // Grouped checkouts each get a Folders section, named by their folder, and by
+  // environment too when the group spans several.
+  const spansEnvironments = new Set(props.members.map((member) => member.environmentId)).size > 1;
   const [draftName, setDraftName] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const updateProject = useAtomCommand(projectEnvironment.update, {
@@ -170,6 +184,124 @@ function ProjectOverviewContent(props: {
           );
         })}
       </SettingsSection>
+
+      {props.members.map((member) => {
+        const environmentLabel =
+          props.environments.find((entry) => entry.environmentId === member.environmentId)?.label ??
+          "this environment";
+        const title =
+          props.members.length === 1
+            ? "Folders"
+            : spansEnvironments
+              ? `Folders in ${fileBasename(member.workspaceRoot)} on ${environmentLabel}`
+              : `Folders in ${fileBasename(member.workspaceRoot)}`;
+        return (
+          <ProjectFoldersSection
+            key={`${member.environmentId}:${member.id}`}
+            project={member}
+            title={title}
+          />
+        );
+      })}
     </>
+  );
+}
+
+/** A multi-folder project's folders on one environment; nothing for any other project. */
+function ProjectFoldersSection(props: {
+  readonly project: EnvironmentProject;
+  readonly title: string;
+}) {
+  const navigation = useNavigation();
+  const { environmentId, id: projectId } = props.project;
+  // Older servers do not know the linked-folders RPC.
+  const supportsMultiFolderProjects =
+    useEnvironmentServerConfig(environmentId)?.environment.capabilities.multiFolderProjects ===
+    true;
+  const foldersQuery = useEnvironmentQuery(
+    supportsMultiFolderProjects
+      ? projectEnvironment.linkedFolders({ environmentId, input: { projectId } })
+      : null,
+  );
+  const canLink = useAtomValue(projectEnvironment.linkFolder.permissionAtom(environmentId));
+  const canUnlink = useAtomValue(projectEnvironment.unlinkFolder.permissionAtom(environmentId));
+  const unlinkFolder = useAtomCommand(projectEnvironment.unlinkFolder, { reportFailure: false });
+  const [removingName, setRemovingName] = useState<string | null>(null);
+  const folders = foldersQuery.data?.folders ?? null;
+  if (folders === null) return null;
+
+  const remove = async (folder: ProjectLinkedFolder) => {
+    setRemovingName(folder.name);
+    try {
+      const result = await unlinkFolder({
+        environmentId,
+        input: { projectId, name: folder.name },
+      });
+      if (AsyncResult.isFailure(result)) {
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          "Could not remove folder",
+          error instanceof Error ? error.message : "The folder could not be removed.",
+        );
+        return;
+      }
+      foldersQuery.refresh();
+    } finally {
+      setRemovingName(null);
+    }
+  };
+  return (
+    <SettingsSection title={props.title}>
+      {folders.map((folder) => (
+        <ListRowLayout
+          key={folder.name}
+          icon="folder"
+          label={folder.name}
+          description={folder.missing ? `${folder.path} (not found)` : folder.path}
+          disabled={removingName === folder.name}
+          accessory={
+            // Only links can be removed; a folder made inside the project holds its files.
+            folder.linked && canUnlink ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Remove ${folder.name}`}
+                disabled={removingName !== null}
+                hitSlop={8}
+                onPress={() => void remove(folder)}
+                className="active:opacity-70"
+              >
+                <SymbolView
+                  name="xmark.circle.fill"
+                  size={Platform.OS === "android" ? 22 : 20}
+                  tintColorClassName="accent-icon-muted"
+                  type="monochrome"
+                />
+              </Pressable>
+            ) : null
+          }
+        />
+      ))}
+      {canLink ? (
+        <View className={folders.length > 0 ? "border-t border-border-subtle" : undefined}>
+          <SettingsActionRow
+            icon="folder.badge.plus"
+            label="Add folders"
+            onPress={() =>
+              navigation.navigate("SettingsSheet", {
+                screen: "SettingsContent",
+                params: {
+                  screen: "SettingsProjectAddFolders",
+                  params: {
+                    environmentId: String(environmentId),
+                    linkProjectId: String(projectId),
+                    linkProjectName: props.project.title,
+                  },
+                },
+              })
+            }
+          />
+        </View>
+      ) : null}
+    </SettingsSection>
   );
 }

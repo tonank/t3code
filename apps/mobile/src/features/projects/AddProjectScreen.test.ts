@@ -109,8 +109,17 @@ vi.mock("../../state/sourceControl", () => ({
     },
   },
 }));
+// Multi-folder selection stays off: these tests cover adding one folder.
+vi.mock("@effect/atom-react", () => ({ useAtomValue: () => false }));
+vi.mock("expo-haptics", () => ({
+  impactAsync: () => Promise.resolve(),
+  ImpactFeedbackStyle: { Light: "light" },
+}));
+vi.mock("../../state/preferences", () => ({ mobilePreferencesAtom: null }));
 vi.mock("../../state/projects", () => ({
   projectEnvironment: {
+    createMultiFolder: { permissionAtom: () => null },
+    linkFolder: { permissionAtom: () => null },
     create: async ({
       environmentId,
       input,

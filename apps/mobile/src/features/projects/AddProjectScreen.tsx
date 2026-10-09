@@ -1,4 +1,5 @@
 import { AppActivityIndicator } from "../../components/AppActivityIndicator";
+import * as Haptics from "expo-haptics";
 import { MaterialListRow } from "../../components/MaterialListRow";
 import { SettingsScreen } from "../settings/components/SettingsScreen";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
@@ -25,7 +26,14 @@ import {
   resolveAddProjectPath,
   sortAddProjectProviderSources,
   type AddProjectRemoteSource,
+  canPickFoldersInLocalFolder,
+  foldersToLink,
+  isFolderLinked,
+  isFolderPicked,
+  type PickedFolder,
+  togglePickedFolder,
 } from "@t3tools/client-runtime/operations/projects";
+import { fileBasename } from "@t3tools/shared/path";
 import {
   connectionStatusText,
   type EnvironmentConnectionPhase,
@@ -50,13 +58,22 @@ import {
   type EnvironmentId,
   type EnvironmentMachineKind,
   ProjectId,
+  type ProjectLinkedFolder,
   resolveEnvironmentMachineKind,
   SourceControlProviderKind,
 } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import { CommonActions, StackActions, useNavigation } from "@react-navigation/native";
 import { SymbolView } from "../../components/AppSymbol";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Platform, Alert, Pressable, View } from "react-native";
+import {
+  type AccessibilityActionEvent,
+  type AccessibilityActionInfo,
+  Alert,
+  Platform,
+  Pressable,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Arr from "effect/Array";
 import * as Cause from "effect/Cause";
@@ -65,6 +82,7 @@ import { AsyncResult } from "effect/reactivity";
 import { cn } from "../../lib/cn";
 import { useProjects, useServerConfigs, waitForProject } from "../../state/entities";
 import { filesystemEnvironment } from "../../state/filesystem";
+import { mobilePreferencesAtom } from "../../state/preferences";
 import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentQuery } from "../../state/query";
 import { environmentSession, useEnvironmentScope, readEnvironmentScope } from "../../state/session";
@@ -104,6 +122,7 @@ interface EnvironmentOption {
   readonly connectionErrorTraceId: string | null;
   /** Server runs clones in the background and streams progress; older servers block. */
   readonly supportsCloneTracking: boolean;
+  readonly supportsMultiFolderProjects: boolean;
 }
 
 const environmentOptionOrder = Order.mapInput(
@@ -198,7 +217,13 @@ function ListRow(props: {
   readonly isFirst?: boolean;
   readonly right?: ReactNode;
   readonly onPress?: () => void;
+  readonly onLongPress?: () => void;
+  readonly accessibilityActions?: ReadonlyArray<AccessibilityActionInfo>;
+  readonly onAccessibilityAction?: (event: AccessibilityActionEvent) => void;
+  /** A row that only shows something: no press feedback, no button role. */
+  readonly interactive?: boolean;
 }) {
+  const interactive = props.interactive !== false;
   if (Platform.OS === "android") {
     return (
       <MaterialListRow
@@ -209,17 +234,28 @@ function ListRow(props: {
         trailing={props.right}
         disabled={props.disabled}
         onPress={props.onPress}
-        accessibilityRole={props.selected !== undefined ? "radio" : "button"}
+        onLongPress={props.onLongPress}
+        accessibilityActions={props.accessibilityActions}
+        onAccessibilityAction={props.onAccessibilityAction}
+        {...(interactive ? {} : { android_ripple: undefined })}
+        accessibilityRole={
+          !interactive ? "none" : props.selected !== undefined ? "radio" : "button"
+        }
         accessibilityState={props.selected !== undefined ? { checked: props.selected } : undefined}
       />
     );
   }
   return (
     <Pressable
-      disabled={props.disabled}
+      disabled={props.disabled || !interactive}
       onPress={props.onPress}
+      onLongPress={props.onLongPress}
+      accessibilityActions={props.accessibilityActions}
+      onAccessibilityAction={props.onAccessibilityAction}
+      accessibilityRole={interactive ? undefined : "none"}
       className={cn(
-        "bg-grouped-card px-3.5 py-2.5 active:opacity-70",
+        "bg-grouped-card px-3.5 py-2.5",
+        interactive && "active:opacity-70",
         !props.isFirst && "border-t border-border-subtle",
         props.disabled && "opacity-[0.45]",
       )}
@@ -282,7 +318,7 @@ function PrimaryActionButton(props: {
 function ProjectPathInput(props: {
   readonly value: string;
   readonly onChangeText: (value: string) => void;
-  readonly onSubmit: () => void;
+  readonly onSubmit?: () => void;
 }) {
   return (
     <TextInput
@@ -420,6 +456,7 @@ function useEnvironmentOptions(): ReadonlyArray<EnvironmentOption> {
         connectionError: runtime?.connectionError ?? null,
         connectionErrorTraceId: runtime?.connectionErrorTraceId ?? null,
         supportsCloneTracking: config?.environment.capabilities.projectCloneTracking === true,
+        supportsMultiFolderProjects: config?.environment.capabilities.multiFolderProjects === true,
       };
     });
     return Arr.sort(
@@ -883,6 +920,99 @@ export function AddProjectRepositoryScreen(props: {
   );
 }
 
+function folderIcon(isGitRepository: boolean, tintColorClassName: string) {
+  return (
+    <SymbolView
+      name={isGitRepository ? "arrow.triangle.branch" : "folder"}
+      size={Platform.OS === "android" ? 24 : 17}
+      tintColorClassName={tintColorClassName}
+      type="monochrome"
+    />
+  );
+}
+
+const FOLDER_ICON_MUTED = folderIcon(false, "accent-icon-muted");
+const REPOSITORY_ICON_MUTED = folderIcon(true, "accent-icon-muted");
+
+const INCLUDE_ACTIONS: ReadonlyArray<AccessibilityActionInfo> = [
+  { name: "longpress", label: "Include" },
+];
+const EXCLUDE_ACTIONS: ReadonlyArray<AccessibilityActionInfo> = [
+  { name: "longpress", label: "Exclude" },
+];
+
+/** How the folder browser picks folders for a multi-folder project. */
+interface FolderPicking {
+  readonly picked: ReadonlyArray<PickedFolder>;
+  /** The project's own folders in link mode: shown included, never toggled. */
+  readonly linked: ReadonlyArray<ProjectLinkedFolder>;
+  readonly disabled: boolean;
+  readonly onToggle: (folder: PickedFolder) => void;
+}
+
+/** The muted mark on an included row, as in the web palette. */
+const INCLUDED_MARK = (
+  <View className="flex-row items-center gap-1">
+    <SymbolView
+      name="checkmark"
+      size={12}
+      tintColorClassName="accent-icon-muted"
+      type="monochrome"
+    />
+    <Text className="text-xs text-foreground-muted">Included</Text>
+  </View>
+);
+
+function selectionHaptic(): void {
+  void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+}
+
+/**
+ * Picked folders pinned under the path, from whatever folder they were picked
+ * in, like the chips in the web palette. Tapping one removes it.
+ */
+function PickedFolderChips(props: {
+  readonly folders: ReadonlyArray<PickedFolder>;
+  readonly disabled: boolean;
+  readonly onRemove: (folder: PickedFolder) => void;
+}) {
+  if (props.folders.length === 0) return null;
+  return (
+    <View className="flex-row flex-wrap gap-2">
+      {props.folders.map((folder) => (
+        <Pressable
+          key={folder.path}
+          accessibilityRole="button"
+          accessibilityLabel={`Remove ${folder.name}`}
+          accessibilityHint={folder.path}
+          disabled={props.disabled}
+          onPress={() => props.onRemove(folder)}
+          className={cn(
+            "flex-row items-center gap-1.5 rounded-full border border-border-subtle bg-grouped-card py-1.5 pr-2 pl-2.5 active:opacity-70",
+            props.disabled && "opacity-45",
+          )}
+        >
+          <SymbolView
+            name={folder.isGitRepository ? "arrow.triangle.branch" : "folder"}
+            size={14}
+            tintColorClassName="accent-icon-muted"
+            type="monochrome"
+          />
+          <Text className="max-w-40 text-sm text-foreground" numberOfLines={1}>
+            {folder.name}
+          </Text>
+          <SymbolView
+            name="xmark"
+            size={12}
+            tintColorClassName="accent-icon-muted"
+            type="monochrome"
+          />
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
 function FolderBrowser(props: {
   readonly environment: EnvironmentOption;
   readonly pathInput: string;
@@ -892,6 +1022,8 @@ function FolderBrowser(props: {
     readonly selectedDirectoryName?: string;
   }) => Promise<boolean>;
   readonly pinnedDirectoryName?: string;
+  /** Picking folders for a multi-folder project: a long press includes a row; a tap still opens it. */
+  readonly picking?: FolderPicking;
 }) {
   const browsePath = useMemo(
     () => getFilesystemBrowsePath(props.pathInput, props.environment.platform),
@@ -931,6 +1063,7 @@ function FolderBrowser(props: {
     () => filterFilesystemBrowseEntries(browseState.data?.entries ?? [], browseFilterQuery),
     [browseFilterQuery, browseState.data?.entries],
   );
+  const picking = props.picking;
 
   return (
     <>
@@ -967,28 +1100,52 @@ function FolderBrowser(props: {
             }}
           />
         ) : null}
-        {visibleBrowseEntries.map((entry, index) => (
-          <ListRow
-            key={entry.fullPath}
-            title={entry.name}
-            icon={
-              <SymbolView
-                name="folder"
-                size={Platform.OS === "android" ? 24 : 17}
-                tintColorClassName="accent-icon-muted"
-                type="monochrome"
-              />
-            }
-            isFirst={index === 0 && !browsePath.canBrowseUp}
-            right={null}
-            onPress={() => {
-              void props.navigateToBrowsePath({
-                browseDirectoryPath: browsePath.directoryPath,
-                selectedDirectoryName: entry.name,
-              });
-            }}
-          />
-        ))}
+        {visibleBrowseEntries.map((entry, index) => {
+          const isRepository = entry.isGitRepository === true;
+          const folder: PickedFolder = {
+            path: entry.fullPath,
+            name: entry.name,
+            isGitRepository: isRepository,
+          };
+          const linked = picking !== undefined && isFolderLinked(picking.linked, entry.fullPath);
+          const picked =
+            linked || (picking !== undefined && isFolderPicked(picking.picked, entry.fullPath));
+          const canToggle = picking !== undefined && !picking.disabled && !linked;
+          const toggle = () => {
+            selectionHaptic();
+            picking?.onToggle(folder);
+          };
+          return (
+            <ListRow
+              key={entry.fullPath}
+              title={entry.name}
+              // Named while picking, when it matters which rows are whole repositories.
+              subtitle={picking && isRepository ? "Git repository" : null}
+              icon={isRepository ? REPOSITORY_ICON_MUTED : FOLDER_ICON_MUTED}
+              isFirst={index === 0 && !browsePath.canBrowseUp}
+              right={picked ? INCLUDED_MARK : null}
+              onPress={() => {
+                void props.navigateToBrowsePath({
+                  browseDirectoryPath: browsePath.directoryPath,
+                  selectedDirectoryName: entry.name,
+                });
+              }}
+              // Touch has no Shift key: a long press includes a folder, and screen
+              // readers get the same as a row action.
+              onLongPress={canToggle ? toggle : undefined}
+              accessibilityActions={
+                canToggle ? (picked ? EXCLUDE_ACTIONS : INCLUDE_ACTIONS) : undefined
+              }
+              onAccessibilityAction={
+                canToggle
+                  ? (event) => {
+                      if (event.nativeEvent.actionName === "longpress") picking.onToggle(folder);
+                    }
+                  : undefined
+              }
+            />
+          );
+        })}
       </ListSection>
     </>
   );
@@ -996,10 +1153,19 @@ function FolderBrowser(props: {
 
 /**
  * New project: a name, then the server makes the folder, README, icon, and
- * first commit. Optionally publishes it to GitHub as a private repository.
+ * first commit, optionally published to GitHub as a private repository. With
+ * `folders` from Local folder, the folder links to each of them instead, on
+ * the environment they were picked from.
  */
-export function AddProjectNewScreen(props: { readonly environmentId?: string | string[] }) {
+export function AddProjectNewScreen(props: {
+  readonly environmentId?: string | string[];
+  readonly folders?: string | string[];
+  readonly repositories?: string | string[];
+}) {
   const navigation = useNavigation();
+  const folders = folderPathsParam(props.folders);
+  const repositories = new Set(folderPathsParam(props.repositories));
+  const gathersFolders = folders.length > 0;
   // Starts on the machine picked in Add project; the rows below switch it.
   const environmentOptions = useEnvironmentOptions().filter(
     (option) => option.newProjectsRoot !== null,
@@ -1009,6 +1175,12 @@ export function AddProjectNewScreen(props: { readonly environmentId?: string | s
   );
   const environment = resolveAddProjectEnvironment(environmentOptions, selectedEnvironmentId);
   const createNew = useAtomCommand(projectEnvironment.createNew, { reportFailure: false });
+  const createMultiFolder = useAtomCommand(projectEnvironment.createMultiFolder, {
+    reportFailure: false,
+  });
+  const canCreateMultiFolder = useAtomValue(
+    projectEnvironment.createMultiFolder.permissionAtom(environment?.environmentId ?? null),
+  );
   const publishRepository = useAtomCommand(sourceControlEnvironment.publishRepository, {
     reportFailure: false,
   });
@@ -1037,7 +1209,8 @@ export function AddProjectNewScreen(props: { readonly environmentId?: string | s
   // Shown when there is a choice, or when the selected machine went away and
   // another one can take over.
   const showMachines =
-    environmentOptions.length > 1 || (environment === null && environmentOptions.length > 0);
+    !gathersFolders &&
+    (environmentOptions.length > 1 || (environment === null && environmentOptions.length > 0));
   const machineRows = showMachines ? (
     <ListSection>
       {environmentOptions.map((option, index) => {
@@ -1082,19 +1255,33 @@ export function AddProjectNewScreen(props: { readonly environmentId?: string | s
     setError(null);
     setIsSubmitting(true);
     try {
-      const result = await createNew({
-        environmentId: environment.environmentId,
-        input: { name: trimmedName },
-      });
-      if (AsyncResult.isFailure(result)) {
-        setError(errorMessage(Cause.squash(result.cause)));
-        return;
+      let created: { readonly projectId: ProjectId; readonly workspaceRoot: string };
+      if (gathersFolders) {
+        const result = await createMultiFolder({
+          environmentId: environment.environmentId,
+          input: { name: trimmedName, folders: [...folders] },
+        });
+        if (AsyncResult.isFailure(result)) {
+          setError(errorMessage(Cause.squash(result.cause)));
+          return;
+        }
+        created = result.value;
+      } else {
+        const result = await createNew({
+          environmentId: environment.environmentId,
+          input: { name: trimmedName },
+        });
+        if (AsyncResult.isFailure(result)) {
+          setError(errorMessage(Cause.squash(result.cause)));
+          return;
+        }
+        created = result.value;
+        if (result.value.commitError !== undefined) {
+          Alert.alert("Created without a first commit", result.value.commitError);
+        }
       }
-      const { projectId, workspaceRoot, commitError } = result.value;
-      if (commitError !== undefined) {
-        Alert.alert("Created without a first commit", commitError);
-      }
-      if (publishes && publishTarget !== null) {
+      const { projectId, workspaceRoot } = created;
+      if (!gathersFolders && publishes && publishTarget !== null) {
         void publishRepository({
           environmentId: environment.environmentId,
           input: {
@@ -1142,6 +1329,9 @@ export function AddProjectNewScreen(props: { readonly environmentId?: string | s
       {error ? <ErrorBanner message={error} /> : null}
       {environment ? (
         <>
+          {gathersFolders && !canCreateMultiFolder ? (
+            <ErrorBanner message="This connection cannot add projects." />
+          ) : null}
           <TextInput
             className="h-12 min-h-12 rounded-[24px] px-4 py-0 text-base leading-snug"
             value={name}
@@ -1160,8 +1350,27 @@ export function AddProjectNewScreen(props: { readonly environmentId?: string | s
               {showMachines ? ` on ${environment.label}` : null}
             </Text>
           ) : null}
-          {machineRows}
-          {publishTarget !== null ? (
+          {gathersFolders ? (
+            <>
+              <SectionTitle>Folders</SectionTitle>
+              <ListSection>
+                {folders.map((path, index) => (
+                  <ListRow
+                    key={path}
+                    title={fileBasename(path)}
+                    subtitle={path}
+                    icon={repositories.has(path) ? REPOSITORY_ICON_MUTED : FOLDER_ICON_MUTED}
+                    isFirst={index === 0}
+                    right={null}
+                    interactive={false}
+                  />
+                ))}
+              </ListSection>
+            </>
+          ) : (
+            machineRows
+          )}
+          {!gathersFolders && publishTarget !== null ? (
             <ListSection>
               <ListRow
                 title={`Create private repository on ${publishTarget.definition.label}`}
@@ -1222,34 +1431,38 @@ export function AddProjectNewScreen(props: { readonly environmentId?: string | s
           ) : null}
           <PrimaryActionButton
             label="Create project"
-            disabled={isSubmitting || trimmedName.length === 0}
+            disabled={
+              isSubmitting || trimmedName.length === 0 || (gathersFolders && !canCreateMultiFolder)
+            }
             onPress={() => void submit()}
             loading={isSubmitting}
           />
-          <ListSection>
-            <ListRow
-              title="Add existing project"
-              subtitle="Open a folder or clone a repository"
-              icon={
-                <SymbolView
-                  name="folder.badge.plus"
-                  size={Platform.OS === "android" ? 24 : 17}
-                  tintColorClassName="accent-icon"
-                  type="monochrome"
-                />
-              }
-              isFirst
-              // New project opens from Add project, so going back shows the
-              // other sources. A deep link has nothing behind it.
-              onPress={() =>
-                navigation.canGoBack()
-                  ? navigation.goBack()
-                  : navigation.dispatch(StackActions.replace("AddProject"))
-              }
-            />
-          </ListSection>
+          {gathersFolders ? null : (
+            <ListSection>
+              <ListRow
+                title="Add existing project"
+                subtitle="Open a folder or clone a repository"
+                icon={
+                  <SymbolView
+                    name="folder.badge.plus"
+                    size={Platform.OS === "android" ? 24 : 17}
+                    tintColorClassName="accent-icon"
+                    type="monochrome"
+                  />
+                }
+                isFirst
+                // New project opens from Add project, so going back shows the
+                // other sources. A deep link has nothing behind it.
+                onPress={() =>
+                  navigation.canGoBack()
+                    ? navigation.goBack()
+                    : navigation.dispatch(StackActions.replace("AddProject"))
+                }
+              />
+            </ListSection>
+          )}
         </>
-      ) : environmentOptions.length > 0 ? (
+      ) : environmentOptions.length > 0 && !gathersFolders ? (
         machineRows
       ) : (
         <EmptyEnvironmentState />
@@ -1258,18 +1471,69 @@ export function AddProjectNewScreen(props: { readonly environmentId?: string | s
   );
 }
 
-export function AddProjectLocalFolderScreen(props: { readonly environmentId?: string | string[] }) {
+const NO_LINKED_FOLDERS: ReadonlyArray<ProjectLinkedFolder> = [];
+
+/**
+ * Local folder: browse to a folder and add it. With this device's multi-folder
+ * setting on and an environment that gathers several folders into one project,
+ * a long press includes a folder (the touch stand-in for web's Shift+click);
+ * picked folders pin under the path as chips, and Next leads to the New project
+ * name step. Opened from a project's settings with `linkProjectId`, picking is
+ * always on and the folders join that project instead.
+ */
+export function AddProjectLocalFolderScreen(props: {
+  readonly environmentId?: string | string[];
+  readonly linkProjectId?: string | string[];
+  readonly linkProjectName?: string | string[];
+}) {
+  const navigation = useNavigation();
   const environment = useEnvironmentFromParam(props.environmentId);
-  const canCreateProject = useEnvironmentScope(
-    environment?.environmentId ?? null,
-    AuthOrchestrationOperateScope,
+  const environmentId = environment?.environmentId ?? null;
+  const linkProjectIdParam = stringParam(props.linkProjectId);
+  const linkProjectId = linkProjectIdParam === null ? null : ProjectId.make(linkProjectIdParam);
+  const linkProjectName = stringParam(props.linkProjectName) ?? "project";
+  const linking = linkProjectId !== null;
+  const canCreateProject = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
+  const canCreateMultiFolder = useAtomValue(
+    projectEnvironment.createMultiFolder.permissionAtom(environmentId),
   );
+  const canLink = useAtomValue(projectEnvironment.linkFolder.permissionAtom(environmentId));
+  const preferences = useAtomValue(mobilePreferencesAtom);
+  // Shared with the project's settings screen, so refreshing here updates its list too.
+  const linkedFoldersQuery = useEnvironmentQuery(
+    environment && linkProjectId
+      ? projectEnvironment.linkedFolders({
+          environmentId: environment.environmentId,
+          input: { projectId: linkProjectId },
+        })
+      : null,
+  );
+  const linkedFolders = linkedFoldersQuery.data?.folders ?? NO_LINKED_FOLDERS;
+  // Adding to a project waits for its folders, so one of them can never be
+  // picked before it shows as included.
+  const picking = canPickFoldersInLocalFolder({
+    browsingLocalFolder:
+      environment !== null &&
+      (!linking || linkedFoldersQuery.data !== null || linkedFoldersQuery.error !== null),
+    serverSupportsMultiFolder: environment?.supportsMultiFolderProjects === true,
+    linking,
+    canLink,
+    enabledOnDevice:
+      AsyncResult.isSuccess(preferences) && preferences.value.multiFolderProjectsEnabled === true,
+    canCreateHere: environment?.newProjectsRoot != null && canCreateMultiFolder,
+  });
   const createProject = useCreateProject(environment);
+  const linkFolder = useAtomCommand(projectEnvironment.linkFolder, { reportFailure: false });
   const { isBrowseNavigating, navigateToBrowsePath, pathInput, setPathInput } =
     useBrowsePathInput(environment);
+  const [pickedFolders, setPickedFolders] = useState<ReadonlyArray<PickedFolder>>([]);
+  const pendingLinks = foldersToLink(pickedFolders, linkedFolders);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
+  const togglePicked = useCallback(
+    (folder: PickedFolder) => setPickedFolders((picked) => togglePickedFolder(picked, folder)),
+    [],
+  );
   const submitPath = useCallback(async () => {
     if (!environment || isBrowseNavigating || isSubmitting) return;
     setError(null);
@@ -1291,19 +1555,100 @@ export function AddProjectLocalFolderScreen(props: { readonly environmentId?: st
     setIsSubmitting(false);
   }, [createProject, environment, isBrowseNavigating, isSubmitting, pathInput]);
 
+  const nameFolders = () => {
+    if (!environment || pickedFolders.length === 0 || isSubmitting) return;
+    navigation.dispatch(
+      StackActions.push("AddProjectNew", {
+        environmentId: environment.environmentId,
+        folders: pickedFolders.map((folder) => folder.path),
+        repositories: pickedFolders
+          .filter((folder) => folder.isGitRepository)
+          .map((folder) => folder.path),
+      }),
+    );
+  };
+
+  // Adds the picked folders to the project this screen was opened for. Folders
+  // that linked before a failure leave the picks, so a retry does not repeat them.
+  const linkPickedFolders = async () => {
+    if (!environment || !linkProjectId || pendingLinks.length === 0 || isSubmitting) return;
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      for (const folder of pendingLinks) {
+        const result = await linkFolder({
+          environmentId: environment.environmentId,
+          input: { projectId: linkProjectId, folder: folder.path },
+        });
+        if (AsyncResult.isFailure(result)) {
+          setError(`Could not add ${folder.name}: ${errorMessage(Cause.squash(result.cause))}`);
+          return;
+        }
+        togglePicked(folder);
+      }
+      navigation.goBack();
+    } finally {
+      linkedFoldersQuery.refresh();
+      setIsSubmitting(false);
+    }
+  };
+
+  const mode = linking ? "link" : picking && pickedFolders.length > 0 ? "name" : "add";
+  const action =
+    mode === "link"
+      ? {
+          label: `Add to ${linkProjectName}`,
+          disabled: pendingLinks.length === 0 || !canLink || isSubmitting,
+          onPress: () => void linkPickedFolders(),
+        }
+      : mode === "name"
+        ? { label: "Next", disabled: isSubmitting, onPress: nameFolders }
+        : {
+            label: "Add project",
+            disabled: !canCreateProject || isBrowseNavigating || isSubmitting,
+            onPress: () => void submitPath(),
+          };
+
   return (
-    <AddProjectShell title="Local folder">
+    <AddProjectShell title={linking ? "Add folders" : "Local folder"}>
       {error ? <ErrorBanner message={error} /> : null}
       {environment ? (
         <>
-          {!canCreateProject ? (
+          {linking && !canLink ? (
+            <ErrorBanner message="This connection cannot change projects." />
+          ) : null}
+          {!linking && !canCreateProject ? (
             <ErrorBanner message="This connection cannot add projects." />
           ) : null}
-          <ProjectPathInput value={pathInput} onChangeText={setPathInput} onSubmit={submitPath} />
+          <ProjectPathInput
+            value={pathInput}
+            onChangeText={setPathInput}
+            onSubmit={
+              mode === "add"
+                ? submitPath
+                : mode === "name"
+                  ? nameFolders
+                  : pendingLinks.length > 0
+                    ? () => void linkPickedFolders()
+                    : undefined
+            }
+          />
+          {picking ? (
+            <PickedFolderChips
+              folders={pickedFolders}
+              disabled={isSubmitting}
+              onRemove={togglePicked}
+            />
+          ) : null}
+          {picking ? (
+            <Text className="px-1 text-sm leading-snug text-foreground-muted">
+              Press and hold a folder to include it.
+            </Text>
+          ) : null}
           <PrimaryActionButton
-            label="Add project"
-            disabled={!canCreateProject || isBrowseNavigating || isSubmitting}
-            onPress={submitPath}
+            label={action.label}
+            disabled={action.disabled}
+            onPress={action.onPress}
             loading={isSubmitting}
           />
           <FolderBrowser
@@ -1311,6 +1656,18 @@ export function AddProjectLocalFolderScreen(props: { readonly environmentId?: st
             navigateToBrowsePath={navigateToBrowsePath}
             pathInput={pathInput}
             setPathInput={setPathInput}
+            picking={
+              picking
+                ? {
+                    picked: pickedFolders,
+                    // The project's own folders show included and cannot change
+                    // here; Remove lives in its settings.
+                    linked: linkedFolders,
+                    disabled: isSubmitting,
+                    onToggle: togglePicked,
+                  }
+                : undefined
+            }
           />
         </>
       ) : (
@@ -1318,6 +1675,11 @@ export function AddProjectLocalFolderScreen(props: { readonly environmentId?: st
       )}
     </AddProjectShell>
   );
+}
+
+function folderPathsParam(value: string | string[] | undefined): ReadonlyArray<string> {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
 }
 
 export function AddProjectDestinationScreen(props: {

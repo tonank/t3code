@@ -138,16 +138,19 @@ make your first commit before pushing.
 ## Work across several folders
 
 A multi-folder project lets one thread work on folders that live in different places, such as a
-backend and a frontend repository. Turn on **Multi-folder projects** in **Settings → General** on
-each device you use. Then, in **Add Project → Local folder**, include folders from any directory
-with Shift+Enter or Shift+click; Git repositories are marked,
-and a plain click still opens a folder. Choose **Next** and name the project.
+backend and a frontend repository. Turn on **Multi-folder projects** in **Settings → General**
+(**Settings → Organization** on mobile) on each device you use. Then, in **Add Project → Local
+folder**, include folders from any directory with Shift+Enter or Shift+click (on mobile, press
+and hold a folder). Included folders stay pinned under the path while you browse, Git
+repositories are marked, and a plain click or tap still opens a folder. Choose **Next** and name
+the project.
 
-T3 Code makes a folder in `~/.t3/projects` that links to each one, under its folder name, and the
-project behaves exactly as if you had added a parent folder holding them. Agents start there and
-can read and edit every linked folder; your files stay where they are. Add or remove folders later
-under **Folders** in the project's settings, or link one by hand into the project folder. Removing
-a folder only removes its link.
+T3 Code makes a folder in `~/.t3/projects` (the `projects` folder of your T3 data directory) that
+links to each one under its folder name, with a `-2` suffix when two share a name, and the project
+behaves exactly as if you had added a parent folder holding them. Agents start there and can read
+and edit every linked folder; your files stay where they are. Add or remove folders later under
+**Folders** in the project's settings, which works without the setting, or link one by hand into
+the project folder. Removing a folder only removes its link.
 
 ## Create a pull request
 

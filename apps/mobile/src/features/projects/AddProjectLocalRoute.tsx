@@ -3,6 +3,9 @@ import { AddProjectLocalFolderScreen } from "./AddProjectScreen";
 
 type AddProjectLocalRouteParams = {
   readonly environmentId?: string | string[];
+  /** From a project's settings: the checked folders are added to this project. */
+  readonly linkProjectId?: string | string[];
+  readonly linkProjectName?: string | string[];
 };
 
 export function AddProjectLocalRoute({

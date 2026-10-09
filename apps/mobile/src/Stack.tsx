@@ -322,6 +322,11 @@ const SettingsContentStack = createV5SheetStackNavigator({
       linking: "project",
       options: { title: "Project overview" },
     }),
+    SettingsProjectAddFolders: createNativeStackScreen({
+      screen: AddProjectLocalRoute,
+      linking: "project/folders",
+      options: { title: "Add folders" },
+    }),
     SettingsKeyboard: createNativeStackScreen({
       screen: SettingsKeyboardRouteScreen,
       linking: "keyboard",

@@ -12,6 +12,7 @@ import {
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
 import { SettingsSection } from "./components/SettingsSection";
+import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 
 const GROUPING_OPTIONS: ReadonlyArray<{
   readonly mode: SidebarProjectGroupingMode;
@@ -65,6 +66,19 @@ export function SettingsProjectGroupingRouteScreen() {
               onPress={() => savePreferences(mobileProjectGroupingModePatch(option.mode))}
             />
           ))}
+        </SettingsSection>
+        <SettingsSection title="Projects">
+          <SettingsSwitchRow
+            icon="square.on.square"
+            label="Multi-folder projects"
+            subtitle="In Add Project → Local folder, press and hold folders to combine them into one project."
+            value={
+              AsyncResult.isSuccess(preferencesResult) &&
+              preferencesResult.value.multiFolderProjectsEnabled === true
+            }
+            disabled={!preferencesReady}
+            onValueChange={(value) => savePreferences({ multiFolderProjectsEnabled: value })}
+          />
         </SettingsSection>
       </ScrollView>
     </SettingsScreen>
