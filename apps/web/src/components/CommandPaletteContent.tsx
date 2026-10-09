@@ -8,8 +8,12 @@ type CommandPaletteContentProps = Omit<ComponentProps<typeof Command>, "children
   readonly children: ReactNode;
   readonly escapeLabel?: ReactNode;
   readonly footerActionLabel?: ReactNode;
+  /** A second key hint after the Enter one, e.g. Shift Enter to include a folder. */
+  readonly footerSecondaryAction?: { readonly keys: string; readonly label: string };
   readonly footerTrailing?: ReactNode;
   readonly inputAccessory?: ReactNode;
+  /** Pinned under the input, above the list, e.g. the folders picked so far. */
+  readonly inputSupplement?: ReactNode;
   readonly inputProps: ComponentProps<typeof CommandInput>;
   /**
    * How tall the results panel may grow: the palette's list, a taller file list, or the whole
@@ -29,8 +33,10 @@ export function CommandPaletteContent({
   children,
   escapeLabel = "Close",
   footerActionLabel,
+  footerSecondaryAction,
   footerTrailing,
   inputAccessory,
+  inputSupplement,
   inputProps,
   panelSize = "list",
   showBackHint,
@@ -53,6 +59,7 @@ export function CommandPaletteContent({
           <CommandInput {...inputProps} ref={inputRef} />
           {inputAccessory}
         </div>
+        {inputSupplement}
         <CommandPanel
           className={
             panelSize === "fill"
@@ -66,19 +73,28 @@ export function CommandPaletteContent({
         </CommandPanel>
         <CommandFooter className="max-sm:flex-col max-sm:items-start">
           <div className="flex items-center gap-3">
-            <KbdGroup>
-              <Kbd>
-                <ArrowUpIcon />
-              </Kbd>
-              <Kbd>
-                <ArrowDownIcon />
-              </Kbd>
-              <span>Navigate</span>
-            </KbdGroup>
+            {/* A second action hint takes the arrows' place, so the footer keeps one line. */}
+            {footerSecondaryAction ? null : (
+              <KbdGroup>
+                <Kbd>
+                  <ArrowUpIcon />
+                </Kbd>
+                <Kbd>
+                  <ArrowDownIcon />
+                </Kbd>
+                <span>Navigate</span>
+              </KbdGroup>
+            )}
             {footerActionLabel !== undefined ? (
               <KbdGroup>
                 <Kbd>Enter</Kbd>
                 <span>{footerActionLabel}</span>
+              </KbdGroup>
+            ) : null}
+            {footerSecondaryAction ? (
+              <KbdGroup>
+                <Kbd>{footerSecondaryAction.keys}</Kbd>
+                <span>{footerSecondaryAction.label}</span>
               </KbdGroup>
             ) : null}
             {showBackHint ? (

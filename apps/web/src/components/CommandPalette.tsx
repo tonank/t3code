@@ -23,6 +23,12 @@ import {
   sortAddProjectProviderSources,
   type AddProjectRemoteSource,
   type AddProjectRemoteSourceReadiness,
+  canPickFoldersInLocalFolder,
+  foldersToLink,
+  isFolderLinked,
+  type PickedFolder,
+  pickedFolderKey,
+  togglePickedFolder,
 } from "@t3tools/client-runtime/operations/projects";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
@@ -46,12 +52,14 @@ import {
   type DesktopWslState,
   type EnvironmentId,
   type EnvironmentMachineKind,
+  type FilesystemBrowseEntry,
   type FilesystemBrowseResult,
   type ProjectId,
   type SourceControlDiscoveryResult,
   SourceControlProviderKind,
   type SourceControlRepositoryInfo,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
+  type ProjectLinkedFolder,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
@@ -66,8 +74,9 @@ import {
   FolderGit2Icon,
   FolderIcon,
   FolderPlusIcon,
-  MessageSquareDashedIcon,
+  FoldersIcon,
   LinkIcon,
+  MessageSquareDashedIcon,
   MessageSquareIcon,
   MonitorIcon,
   MoonIcon,
@@ -127,7 +136,11 @@ import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { useScratchProject } from "../hooks/useScratchProject";
-import { useNewProject } from "../hooks/useNewProject";
+import {
+  useLinkProjectFolders,
+  useNewMultiFolderProject,
+  useNewProject,
+} from "../hooks/useNewProject";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useProjects, useServerConfigs, useThreadShells, waitForProject } from "../state/entities";
@@ -144,7 +157,13 @@ import {
   isUnsupportedWindowsProjectPath,
   resolveProjectPathForDispatch,
 } from "../lib/projectPaths";
-import { onOpenCommandPalette } from "../commandPaletteBus";
+import { type CommandPaletteLinkFoldersTarget, onOpenCommandPalette } from "../commandPaletteBus";
+import {
+  buildPickedFolderItems,
+  FOLDER_INCLUDED_TRAILING,
+  PICKED_FOLDER_ITEM_PREFIX,
+  PickedFolderChips,
+} from "./CommandPaletteFolderPicking";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import {
@@ -188,6 +207,7 @@ import {
   type CommandPaletteView,
   filterCommandPaletteGroups,
   filterPinnedBrowseEntries,
+  getBrowseSubmitLabel,
   getCommandPaletteInputPlaceholder,
   getCommandPaletteMode,
   ITEM_ICON_CLASS,
@@ -245,6 +265,8 @@ import {
 import type { Project } from "../types";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { readPullRequestListPreferences } from "~/components/pullRequest/pullRequestListPreferences";
+
+const NO_LINKED_FOLDERS: ReadonlyArray<ProjectLinkedFolder> = [];
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
 
@@ -385,6 +407,10 @@ export function CommandPalette({ children }: { children: ReactNode }) {
   );
   const openAddProject = useCallback(() => dispatch({ _tag: "OpenAddProject" }), []);
   const openNewThreadIn = useCallback(() => dispatch({ _tag: "OpenNewThreadIn" }), []);
+  const openLinkFolders = useCallback(
+    (target: CommandPaletteLinkFoldersTarget) => dispatch({ _tag: "OpenLinkFolders", target }),
+    [],
+  );
   const clearOpenIntent = useCallback(() => dispatch({ _tag: "ClearOpenIntent" }), []);
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { theme, themeHalves, resolvedTheme, appearanceMode, setAppearanceMode } = useTheme();
@@ -503,6 +529,8 @@ export function CommandPalette({ children }: { children: ReactNode }) {
           openNewThreadIn();
         } else if (detail.open === "add-project") {
           openAddProject();
+        } else if (detail.open === "link-folders" && detail.linkFolders) {
+          openLinkFolders(detail.linkFolders);
         } else if (detail.query !== undefined) {
           dispatch({
             _tag: "OpenSearch",
@@ -513,7 +541,7 @@ export function CommandPalette({ children }: { children: ReactNode }) {
           setOpen(true);
         }
       }),
-    [openAddProject, openNewThreadIn, setOpen],
+    [openAddProject, openLinkFolders, openNewThreadIn, setOpen],
   );
 
   return (
@@ -787,16 +815,31 @@ function OpenCommandPaletteDialog(props: {
     readonly environmentId: EnvironmentId;
     /** Machine of the Add project sources view under this step; null from the palette root. */
     readonly sourcesEnvironmentId: EnvironmentId | null;
+    /** Set when naming a multi-folder project: the Local folder path Back returns to. */
+    readonly multiFolderBrowseQuery?: string;
   } | null>(null);
   const [newProjectPublishes, setNewProjectPublishes] = useState(false);
   // The host picked beside the publish toggle; null takes the first ready host, GitHub when ready.
   const [newProjectPublishKind, setNewProjectPublishKind] =
     useState<SourceControlProviderKind | null>(null);
   const [newProjectHostPickerOpen, setNewProjectHostPickerOpen] = useState(false);
+  // Folders picked in Local folder, kept until the flow is left. They become a
+  // new multi-folder project, or join `linkFoldersTarget` when opened from a
+  // project's settings.
+  const [pickedFolders, setPickedFolders] = useState<ReadonlyArray<PickedFolder>>([]);
+  const [linkFoldersTarget, setLinkFoldersTarget] =
+    useState<CommandPaletteLinkFoldersTarget | null>(null);
+  const resetFolderPicking = useCallback(() => {
+    setPickedFolders([]);
+    setLinkFoldersTarget(null);
+  }, []);
+  const linkProjectFolders = useLinkProjectFolders();
   const [isCreatingNewProject, setIsCreatingNewProject] = useState(false);
+  const [isLinkingFolders, setIsLinkingFolders] = useState(false);
   // State lags a render behind, so a repeated Enter could start a second create.
   const newProjectSubmittingRef = useRef(false);
   const createNewProject = useNewProject();
+  const createMultiFolderProject = useNewMultiFolderProject();
   const cloneLookupGeneration = useRef(0);
   const [isRemoteProjectLookingUp, setIsRemoteProjectLookingUp] = useState(false);
   const [isRemoteProjectCloning, setIsRemoteProjectCloning] = useState(false);
@@ -1442,6 +1485,15 @@ function OpenCommandPaletteDialog(props: {
 
   function popView(): void {
     browseNavigation.invalidate();
+    // Adding folders was opened from a project's settings; Back goes there.
+    if (linkFoldersTarget !== null && viewStack.length <= 1) {
+      resetFolderPicking();
+      setOpen(false);
+      return;
+    }
+    // Back from naming a multi-folder project returns to the folders it was browsing.
+    const returnQuery = newProjectFlow?.multiFolderBrowseQuery;
+    if (returnQuery === undefined) resetFolderPicking();
     setAddProjectCloneFlow(null);
     setNewProjectFlow(null);
     if (viewStack.length <= 1) {
@@ -1452,20 +1504,30 @@ function OpenCommandPaletteDialog(props: {
     }
     setViewStack((previousViews) => previousViews.slice(0, -1));
     setHighlightedItemValue(null);
-    setQuery("");
+    setQuery(returnQuery ?? "");
   }
 
   function handleQueryChange(nextQuery: string): void {
     browseNavigation.invalidate();
     clearTypedHighlight();
     setQuery(nextQuery);
-    if (nextQuery === "" && currentView?.initialQuery) {
+    // Clearing the path leaves Local folder, unless folders are picked there or
+    // it was opened to add folders to a project, where Back is the way out.
+    if (
+      nextQuery === "" &&
+      currentView?.initialQuery &&
+      !hasPickedFolders &&
+      linkFoldersTarget === null
+    ) {
       popView();
     }
   }
 
   const startAddProjectBrowse = useCallback(
-    async (environmentId: EnvironmentId): Promise<void> => {
+    async (
+      environmentId: EnvironmentId,
+      options?: { readonly linkTo: CommandPaletteLinkFoldersTarget },
+    ): Promise<void> => {
       const initialQuery = getAddProjectInitialQueryForEnvironment(environmentId);
       const initialBrowsePath = getBrowseDirectoryPath(initialQuery);
       const browseCwd = getBrowseCwdForEnvironment(environmentId);
@@ -1483,6 +1545,8 @@ function OpenCommandPaletteDialog(props: {
         () => {
           setAddProjectEnvironmentId(environmentId);
           setAddProjectCloneFlow(null);
+          resetFolderPicking();
+          if (options) setLinkFoldersTarget(options.linkTo);
           pushPaletteView(view);
         },
       );
@@ -1493,6 +1557,7 @@ function OpenCommandPaletteDialog(props: {
       getBrowseCwdForEnvironment,
       prefetchBrowsePath,
       pushPaletteView,
+      resetFolderPicking,
     ],
   );
 
@@ -1500,13 +1565,14 @@ function OpenCommandPaletteDialog(props: {
     (environmentId: EnvironmentId, source: AddProjectRemoteSource): void => {
       setAddProjectEnvironmentId(environmentId);
       setAddProjectCloneFlow({ step: "repository", environmentId, source });
+      resetFolderPicking();
       pushPaletteView({
         addonIcon: remoteProjectSourceIcon(source, ADDON_ICON_CLASS),
         groups: [],
         initialQuery: "",
       });
     },
-    [pushPaletteView],
+    [pushPaletteView, resetFolderPicking],
   );
 
   /** Folder that holds an environment's name-only projects, or null when it has none. */
@@ -1524,12 +1590,13 @@ function OpenCommandPaletteDialog(props: {
       setNewProjectFlow({ environmentId, sourcesEnvironmentId });
       setNewProjectPublishes(false);
       setNewProjectPublishKind(null);
+      resetFolderPicking();
       pushPaletteView({
         addonIcon: <FolderGit2Icon className={ADDON_ICON_CLASS} />,
         groups: [],
       });
     },
-    [pushPaletteView],
+    [pushPaletteView, resetFolderPicking],
   );
 
   const openSourceControlSettings = useCallback(() => {
@@ -1546,7 +1613,15 @@ function OpenCommandPaletteDialog(props: {
         {
           kind: "action",
           value: `action:add-project:${environmentId}:local`,
-          searchTerms: ["local", "folder", "directory", "browse"],
+          searchTerms: [
+            "local",
+            "folder",
+            "directory",
+            "browse",
+            "multi-folder",
+            "multiple folders",
+            "combine",
+          ],
           title: "Local folder",
           description: "Browse a folder on disk",
           icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
@@ -1668,6 +1743,7 @@ function OpenCommandPaletteDialog(props: {
       }
       setAddProjectEnvironmentId(environmentId);
       setAddProjectCloneFlow(null);
+      resetFolderPicking();
       pushPaletteView({
         addonIcon: <FolderPlusIcon className={ADDON_ICON_CLASS} />,
         groups: buildAddProjectSourceGroups(
@@ -1683,6 +1759,7 @@ function OpenCommandPaletteDialog(props: {
       buildAddProjectSourceGroups,
       environments,
       pushPaletteView,
+      resetFolderPicking,
       sourceControlDiscovery.data,
     ],
   );
@@ -1772,11 +1849,12 @@ function OpenCommandPaletteDialog(props: {
     setIsRemoteProjectLookingUp(false);
     setAddProjectCloneFlow(null);
     setNewProjectFlow(null);
+    resetFolderPicking();
     setViewStack([]);
     setLinkedThreadSearch(openIntent);
     setQuery(openIntent.query);
     clearOpenIntent();
-  }, [browseNavigation, clearOpenIntent, openIntent]);
+  }, [browseNavigation, clearOpenIntent, openIntent, resetFolderPicking]);
 
   useLayoutEffect(() => {
     if (openIntent?.kind !== "add-project") {
@@ -1787,6 +1865,13 @@ function OpenCommandPaletteDialog(props: {
   }, [clearOpenIntent, openAddProjectFlow, openIntent]);
 
   useLayoutEffect(() => {
+    if (openIntent?.kind !== "link-folders") return;
+    clearOpenIntent();
+    const { target } = openIntent;
+    void startAddProjectBrowse(target.environmentId, { linkTo: target });
+  }, [clearOpenIntent, openIntent, startAddProjectBrowse]);
+
+  useLayoutEffect(() => {
     if (openIntent?.kind !== "new-thread-in" || projectThreadItems.length === 0) {
       return;
     }
@@ -1794,6 +1879,7 @@ function OpenCommandPaletteDialog(props: {
     browseNavigation.invalidate();
     setAddProjectCloneFlow(null);
     setNewProjectFlow(null);
+    resetFolderPicking();
     setViewStack([]);
     setQuery("");
     // projectThreadItems already lists the current project first.
@@ -1801,7 +1887,14 @@ function OpenCommandPaletteDialog(props: {
       addonIcon: <SquarePenIcon className={ADDON_ICON_CLASS} />,
       groups: [{ value: "projects", label: "Projects", items: projectThreadItems }],
     });
-  }, [clearOpenIntent, browseNavigation, openIntent, projectThreadItems, pushPaletteView]);
+  }, [
+    clearOpenIntent,
+    browseNavigation,
+    openIntent,
+    projectThreadItems,
+    pushPaletteView,
+    resetFolderPicking,
+  ]);
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
 
@@ -2181,12 +2274,13 @@ function OpenCommandPaletteDialog(props: {
     setIsRemoteProjectLookingUp(false);
     setAddProjectCloneFlow(null);
     setNewProjectFlow(null);
+    resetFolderPicking();
     setViewStack([]);
     pushPaletteView({
       addonIcon: <PaletteIcon className={ADDON_ICON_CLASS} />,
       groups: [{ value: "themes", label: "Change theme", items: [] }],
     });
-  }, [browseNavigation, clearOpenIntent, openIntent, pushPaletteView]);
+  }, [browseNavigation, clearOpenIntent, openIntent, pushPaletteView, resetFolderPicking]);
 
   actionItems.push({
     kind: "action",
@@ -2508,8 +2602,13 @@ function OpenCommandPaletteDialog(props: {
     ],
   );
 
+  // The name step also names a multi-folder project, made from the checked folders;
+  // that project has no repository of its own to publish.
+  const isNamingMultiFolderProject = newProjectFlow?.multiFolderBrowseQuery !== undefined;
   const newProjectPublishTargets =
-    newProjectFlow === null ? [] : getNewProjectPublishTargets(sourceControlDiscovery.data ?? null);
+    newProjectFlow === null || isNamingMultiFolderProject
+      ? []
+      : getNewProjectPublishTargets(sourceControlDiscovery.data ?? null);
   const newProjectPublishTarget = getNewProjectPublishTarget(
     newProjectPublishTargets,
     newProjectPublishKind,
@@ -2518,6 +2617,7 @@ function OpenCommandPaletteDialog(props: {
   const canSubmitNewProject =
     newProjectFlow !== null &&
     newProjectName.length > 0 &&
+    (!isNamingMultiFolderProject || pickedFolders.length > 0) &&
     !isCreatingNewProject &&
     canCreateProjectInEnvironment(browseEnvironment?.connection.phase);
 
@@ -2528,11 +2628,18 @@ function OpenCommandPaletteDialog(props: {
     newProjectSubmittingRef.current = true;
     setIsCreatingNewProject(true);
     try {
-      const created = await createNewProject({
-        environmentId: newProjectFlow.environmentId,
-        name: newProjectName,
-        publishTo: newProjectPublishes ? newProjectPublishTarget : null,
-      });
+      const created = isNamingMultiFolderProject
+        ? await createMultiFolderProject({
+            environmentId: newProjectFlow.environmentId,
+            name: newProjectName,
+            folders: pickedFolders.map((folder) => folder.path),
+          })
+        : await createNewProject({
+            environmentId: newProjectFlow.environmentId,
+            name: newProjectName,
+            publishTo: newProjectPublishes ? newProjectPublishTarget : null,
+          });
+      // Closing unmounts the palette, which discards the flow's state.
       if (created) setOpen(false);
     } finally {
       newProjectSubmittingRef.current = false;
@@ -2805,15 +2912,99 @@ function OpenCommandPaletteDialog(props: {
 
   const canBrowseUp = !relativePathNeedsActiveProject && browsePath.canBrowseUp;
 
+  // Local folder lets folders be picked for a multi-folder project when this
+  // device has them turned on (Settings → General) and the environment can make
+  // one under newProjectsRoot for this connection; adding folders to an
+  // existing project needs only the link permission.
+  const canCreateMultiFolderProject = useAtomValue(
+    projectEnvironment.createMultiFolder.permissionAtom(browseEnvironmentId),
+  );
+  const canLinkProjectFolders = useAtomValue(
+    projectEnvironment.linkFolder.permissionAtom(browseEnvironmentId),
+  );
+  // Adding to a project: its folders show as included and cannot be picked again.
+  const linkedFoldersQuery = useEnvironmentQuery(
+    linkFoldersTarget === null
+      ? null
+      : projectEnvironment.linkedFolders({
+          environmentId: linkFoldersTarget.environmentId,
+          input: { projectId: linkFoldersTarget.projectId },
+        }),
+  );
+  const linkedFolders = linkedFoldersQuery.data?.folders ?? NO_LINKED_FOLDERS;
+  // Picking belongs to the Local folder view, whatever the path field holds, so
+  // clearing the path never drops the picks. Adding to a project waits for its
+  // folders, so one of them can never be picked before it shows as included.
+  const pickingFolders = canPickFoldersInLocalFolder({
+    browsingLocalFolder:
+      currentView?.initialQuery !== undefined &&
+      addProjectEnvironmentId !== null &&
+      addProjectCloneFlow === null &&
+      newProjectFlow === null &&
+      // A failed read falls back to an empty list; the server refuses duplicates.
+      (linkFoldersTarget === null ||
+        linkedFoldersQuery.data !== null ||
+        linkedFoldersQuery.error !== null),
+    serverSupportsMultiFolder:
+      browseEnvironment?.serverConfig?.environment.capabilities.multiFolderProjects === true,
+    linking: linkFoldersTarget !== null,
+    canLink: canLinkProjectFolders,
+    enabledOnDevice: clientSettings.multiFolderProjectsEnabled,
+    canCreateHere: newProjectsRootFor(browseEnvironmentId) !== null && canCreateMultiFolderProject,
+  });
+  const hasPickedFolders = pickingFolders && pickedFolders.length > 0;
+  const pendingLinks = foldersToLink(pickedFolders, linkedFolders);
+  const togglePicked = (folder: PickedFolder) =>
+    setPickedFolders((picked) => togglePickedFolder(picked, folder));
+  const pickEntry = (entry: FilesystemBrowseEntry) => {
+    if (isFolderLinked(linkedFolders, entry.fullPath)) return;
+    togglePicked({
+      path: entry.fullPath,
+      name: entry.name,
+      isGitRepository: entry.isGitRepository === true,
+    });
+  };
+  const pickedFolderKeys = useMemo(
+    () => new Set(pickedFolders.map((folder) => pickedFolderKey(folder.path))),
+    [pickedFolders],
+  );
+  const highlightedEntryPath = highlightedItemValue?.startsWith("browse:")
+    ? highlightedItemValue.slice("browse:".length)
+    : null;
+  const highlightedEntryIsPicked =
+    highlightedEntryPath !== null && pickedFolderKeys.has(pickedFolderKey(highlightedEntryPath));
+  const highlightedEntryIsLinked =
+    highlightedEntryPath !== null && isFolderLinked(linkedFolders, highlightedEntryPath);
+  const includedEntryTrailing = (entry: FilesystemBrowseEntry): ReactNode =>
+    pickedFolderKeys.has(pickedFolderKey(entry.fullPath)) ||
+    isFolderLinked(linkedFolders, entry.fullPath)
+      ? FOLDER_INCLUDED_TRAILING
+      : undefined;
+  const pickedFolderItems = buildPickedFolderItems(pickedFolders);
   const browseGroups = buildBrowseGroups({
     browseEntries: visibleBrowseEntries,
     browseQuery: query,
     canBrowseUp,
     upIcon: <CornerLeftUpIcon className={ITEM_ICON_CLASS} />,
     directoryIcon: <FolderIcon className={ITEM_ICON_CLASS} />,
+    gitRepositoryIcon: <FolderGit2Icon className={ITEM_ICON_CLASS} />,
     browseUp,
     browseTo,
+    ...(pickingFolders
+      ? { describeRepositories: true, entryTrailingContent: includedEntryTrailing }
+      : {}),
   });
+
+  // Names the project made from the checked folders; Back returns to this path.
+  const startNamingMultiFolderProject = () => {
+    if (browseEnvironmentId === null || pickedFolders.length === 0) return;
+    setNewProjectFlow({
+      environmentId: browseEnvironmentId,
+      sourcesEnvironmentId: null,
+      multiFolderBrowseQuery: query,
+    });
+    pushPaletteView({ addonIcon: <FoldersIcon className={ADDON_ICON_CLASS} />, groups: [] });
+  };
   const cloneDestinationBrowseGroups = useMemo(
     () =>
       browseGroups.map((group) =>
@@ -2869,6 +3060,7 @@ function OpenCommandPaletteDialog(props: {
   // another one can take over.
   const showNewProjectMachines =
     newProjectFlow !== null &&
+    !isNamingMultiFolderProject &&
     (newProjectEnvironmentOptions.length > 1 ||
       (selectedNewProjectEnvironment === undefined && newProjectEnvironmentOptions.length > 0));
   const newProjectEnvironmentLabel = showNewProjectMachines
@@ -2900,7 +3092,7 @@ function OpenCommandPaletteDialog(props: {
           })),
         };
   const newProjectExistingGroup: CommandPaletteView["groups"][number] | null =
-    newProjectFlow === null
+    newProjectFlow === null || isNamingMultiFolderProject
       ? null
       : {
           value: "new-project-existing",
@@ -3015,7 +3207,9 @@ function OpenCommandPaletteDialog(props: {
         ];
 
   let displayedGroups: CommandPaletteView["groups"] = filteredGroups;
-  if (newProjectFlow !== null) {
+  if (isNamingMultiFolderProject) {
+    displayedGroups = [{ value: "picked-folders", label: "Folders", items: pickedFolderItems }];
+  } else if (newProjectFlow !== null) {
     displayedGroups = [
       ...(newProjectMachineGroup ? [newProjectMachineGroup] : []),
       ...newProjectOptionGroups,
@@ -3054,9 +3248,12 @@ function OpenCommandPaletteDialog(props: {
     !relativePathNeedsActiveProject &&
     canCreateProject &&
     (!isCloneDestinationStep || canCloneProject) &&
+    (linkFoldersTarget === null || pendingLinks.length > 0) &&
     canCreateProjectInEnvironment(browseEnvironment?.connection.phase);
   const willCreateProjectPath =
     canSubmitBrowsePath &&
+    linkFoldersTarget === null &&
+    !hasPickedFolders &&
     !isBrowsePending &&
     browseAccessError === null &&
     query.trim().length > 0 &&
@@ -3064,13 +3261,13 @@ function OpenCommandPaletteDialog(props: {
     (hasTrailingPathSeparator(query) ? !browseResult : exactBrowseEntry === null);
   const useMetaForMod = isMacPlatform(navigator.platform);
   const submitModifierLabel = useMetaForMod ? "\u2318" : "Ctrl";
-  const submitActionLabel = isCloneDestinationStep
-    ? willCreateProjectPath
-      ? "Create & Clone"
-      : "Clone"
-    : willCreateProjectPath
-      ? "Create & Add"
-      : "Add";
+  const pickShortcutLabel = useMetaForMod ? "\u21e7Enter" : "Shift+Enter";
+  const submitActionLabel = getBrowseSubmitLabel({
+    hasPickedFolders,
+    linkTo: linkFoldersTarget?.projectName ?? null,
+    isCloneDestination: isCloneDestinationStep,
+    willCreatePath: willCreateProjectPath,
+  });
   const addShortcutLabel = hasHighlightedBrowseItem ? `${submitModifierLabel} Enter` : "Enter";
   const remoteProjectButtonLabel = addProjectCloneFlow
     ? addProjectCloneFlow.source === "url"
@@ -3119,6 +3316,40 @@ function OpenCommandPaletteDialog(props: {
     currentProjectCwdForBrowse,
     query,
   ]);
+
+  // Adds the picked folders to the project this browse was opened for. Folders
+  // that linked before a failure leave the picks, so a retry does not repeat them.
+  async function linkPickedFolders(): Promise<void> {
+    if (linkFoldersTarget === null || pendingLinks.length === 0 || isLinkingFolders) return;
+    setIsLinkingFolders(true);
+    try {
+      const linked = await linkProjectFolders({
+        environmentId: linkFoldersTarget.environmentId,
+        projectId: linkFoldersTarget.projectId,
+        folders: pendingLinks.map((folder) => folder.path),
+      });
+      if (linked.length === pendingLinks.length) {
+        setOpen(false);
+        return;
+      }
+      setPickedFolders((picked) => picked.filter((folder) => !linked.includes(folder.path)));
+    } finally {
+      setIsLinkingFolders(false);
+    }
+  }
+
+  function submitBrowsePath(): void {
+    if (relativePathNeedsActiveProject) return;
+    if (isCloneDestinationStep) {
+      void submitAddProjectCloneFlow(resolvedAddProjectPath);
+    } else if (linkFoldersTarget !== null) {
+      void linkPickedFolders();
+    } else if (hasPickedFolders) {
+      startNamingMultiFolderProject();
+    } else {
+      void handleAddProject(resolvedAddProjectPath);
+    }
+  }
 
   function isPrimaryModifierPressed(event: KeyboardEvent<HTMLInputElement>): boolean {
     return useMetaForMod ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
@@ -3179,6 +3410,28 @@ function OpenCommandPaletteDialog(props: {
       return;
     }
 
+    // While picking folders, Shift+Enter checks the highlighted folder; Enter
+    // still opens it.
+    if (
+      pickingFolders &&
+      event.key === "Enter" &&
+      event.shiftKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      const entry = visibleBrowseEntries.find(
+        (candidate) => `browse:${candidate.fullPath}` === highlightedItemValue,
+      );
+      if (entry) {
+        (event as typeof event & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
+        event.preventDefault();
+        pickEntry(entry);
+        return;
+      }
+    }
+
     const shouldSubmitBrowsePath =
       canSubmitBrowsePath &&
       event.key === "Enter" &&
@@ -3186,15 +3439,12 @@ function OpenCommandPaletteDialog(props: {
 
     if (shouldSubmitBrowsePath) {
       event.preventDefault();
-      if (isCloneDestinationStep) {
-        void submitAddProjectCloneFlow(resolvedAddProjectPath);
-      } else {
-        void handleAddProject(resolvedAddProjectPath);
-      }
+      submitBrowsePath();
       return;
     }
 
-    if (event.key === "Backspace" && query === "" && isSubmenu) {
+    // Picks are left only by Back or Esc, never by one keystroke too many.
+    if (event.key === "Backspace" && query === "" && isSubmenu && !hasPickedFolders) {
       event.preventDefault();
       popView();
       return;
@@ -3235,6 +3485,24 @@ function OpenCommandPaletteDialog(props: {
         executeItem(highlightedItem);
       }
     }
+  }
+
+  // Shift+click on a folder includes it in a multi-folder project, like
+  // Shift+Enter; a plain click still opens it.
+  function executeResultItem(
+    item: CommandPaletteActionItem | CommandPaletteSubmenuItem,
+    options?: { readonly shiftKey: boolean },
+  ): void {
+    if (options?.shiftKey && pickingFolders) {
+      const entry = visibleBrowseEntries.find(
+        (candidate) => `browse:${candidate.fullPath}` === item.value,
+      );
+      if (entry) {
+        pickEntry(entry);
+        return;
+      }
+    }
+    executeItem(item);
   }
 
   function executeItem(item: CommandPaletteActionItem | CommandPaletteSubmenuItem): void {
@@ -3442,26 +3710,22 @@ function OpenCommandPaletteDialog(props: {
                 !canCreateProject ||
                 !canCreateProjectInEnvironment(browseEnvironment?.connection.phase) ||
                 relativePathNeedsActiveProject ||
+                (linkFoldersTarget !== null && (pendingLinks.length === 0 || isLinkingFolders)) ||
                 (isCloneDestinationStep && (!canCloneProject || isRemoteProjectPending))
               }
               onMouseDown={(event) => {
                 event.preventDefault();
               }}
-              onClick={() => {
-                if (relativePathNeedsActiveProject) {
-                  return;
-                }
-                if (isCloneDestinationStep) {
-                  void submitAddProjectCloneFlow(resolvedAddProjectPath);
-                } else {
-                  void handleAddProject(resolvedAddProjectPath);
-                }
-              }}
+              onClick={submitBrowsePath}
             />
           }
         >
           <span>
-            {isCloneDestinationStep && isRemoteProjectPending ? "Cloning" : submitActionLabel}
+            {isCloneDestinationStep && isRemoteProjectPending
+              ? "Cloning"
+              : isLinkingFolders
+                ? "Adding"
+                : submitActionLabel}
           </span>
           <KbdGroup className="pointer-events-none -me-0.5">
             <Kbd>{hasHighlightedBrowseItem ? `${submitModifierLabel} Enter` : "Enter"}</Kbd>
@@ -3483,13 +3747,20 @@ function OpenCommandPaletteDialog(props: {
         ? "Create"
         : highlightedItemValue === newProjectPublishToggleValue
           ? "Toggle"
-          : "Select"
+          : highlightedItemValue.startsWith(PICKED_FOLDER_ITEM_PREFIX)
+            ? undefined
+            : "Select"
       : addProjectCloneFlow?.step === "repository"
         ? (remoteProjectButtonLabel ?? "Continue")
         : !canSubmitBrowsePath || hasHighlightedBrowseItem
           ? "Select"
           : undefined;
 
+  // Checked folders stay pinned under the path as chips, from whatever
+  // directory they were checked in, without repeating rows in the list.
+  const pickedFolderChips = hasPickedFolders ? (
+    <PickedFolderChips folders={pickedFolders} onRemove={togglePicked} />
+  ) : null;
   const footerTrailing = canOpenProjectFromFileManager ? (
     <CommandFooterAction
       disabled={isPickingProjectFolder}
@@ -3507,8 +3778,17 @@ function OpenCommandPaletteDialog(props: {
       aria-label="Command palette"
       autoHighlight={autoHighlightsFirstRow ? "always" : false}
       footerActionLabel={footerActionLabel}
+      {...(pickingFolders && !highlightedEntryIsLinked
+        ? {
+            footerSecondaryAction: {
+              keys: pickShortcutLabel,
+              label: highlightedEntryIsPicked ? "Exclude" : "Include",
+            },
+          }
+        : {})}
       footerTrailing={footerTrailing}
       inputAccessory={inputAccessory}
+      inputSupplement={pickedFolderChips}
       inputProps={{
         // The submit button is absolutely positioned over the field, so the
         // inner input must reserve enough room for the full action label.
@@ -3559,7 +3839,11 @@ function OpenCommandPaletteDialog(props: {
       {newProjectPathPreview !== null ? (
         <div className="p-2 pb-0">
           <div className="flex min-h-8 items-center gap-2 rounded-sm px-2 py-1.5">
-            <FolderGit2Icon className={ITEM_ICON_CLASS} />
+            {isNamingMultiFolderProject ? (
+              <FoldersIcon className={ITEM_ICON_CLASS} />
+            ) : (
+              <FolderGit2Icon className={ITEM_ICON_CLASS} />
+            )}
             <span className="flex min-w-0 flex-1 flex-col">
               <span className="truncate text-foreground text-sm">
                 {newProjectName.length > 0 ? newProjectName : "New project"}
@@ -3603,7 +3887,7 @@ function OpenCommandPaletteDialog(props: {
         highlightedItemValue={highlightedItemValue}
         isActionsOnly={isActionsOnly}
         keybindings={keybindings}
-        onExecuteItem={executeItem}
+        onExecuteItem={executeResultItem}
         {...(addProjectCloneFlow?.step === "repository"
           ? {
               emptyStateMessage:

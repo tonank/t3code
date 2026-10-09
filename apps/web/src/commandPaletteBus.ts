@@ -1,4 +1,4 @@
-import type { EnvironmentId, PullRequestLinkedThreadsResult } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectId, PullRequestLinkedThreadsResult } from "@t3tools/contracts";
 
 export interface CommandPaletteLinkedThreads {
   readonly environmentId: EnvironmentId;
@@ -9,10 +9,19 @@ export interface CommandPaletteLinkedThreads {
 // without owning its React state.
 const COMMAND_PALETTE_OPEN_EVENT = "t3code:open-command-palette";
 
+/** A multi-folder project to add folders to, from its settings. */
+export interface CommandPaletteLinkFoldersTarget {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly projectName: string;
+}
+
 export interface CommandPaletteOpenDetail {
-  readonly open?: "add-project" | "new-thread-in";
+  readonly open?: "add-project" | "new-thread-in" | "link-folders";
   readonly query?: string;
   readonly linkedThreads?: CommandPaletteLinkedThreads;
+  /** With `open: "link-folders"`: the project the chosen folders are linked into. */
+  readonly linkFolders?: CommandPaletteLinkFoldersTarget;
 }
 
 export function openCommandPalette(detail?: CommandPaletteOpenDetail): void {

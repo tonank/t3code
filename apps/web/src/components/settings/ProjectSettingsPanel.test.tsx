@@ -69,6 +69,8 @@ vi.mock("~/rpc/atomRegistry", () => ({
     return state.registry;
   },
 }));
+// The Folders section has its own environment and command dependencies.
+vi.mock("./ProjectFoldersSettings", () => ({ ProjectFoldersSettings: () => null }));
 vi.mock("~/state/environments", () => ({
   useEnvironments: () => ({ environments }),
   usePrimaryEnvironmentId: () => primaryId,

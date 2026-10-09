@@ -135,6 +135,20 @@ For a local Git repository without a remote, **Publish Repository** creates a ho
 adds it as `origin`, and pushes your commits. If there are no commits yet, it creates the remote;
 make your first commit before pushing.
 
+## Work across several folders
+
+A multi-folder project lets one thread work on folders that live in different places, such as a
+backend and a frontend repository. Turn on **Multi-folder projects** in **Settings → General** on
+each device you use. Then, in **Add Project → Local folder**, include folders from any directory
+with Shift+Enter or Shift+click; Git repositories are marked,
+and a plain click still opens a folder. Choose **Next** and name the project.
+
+T3 Code makes a folder in `~/.t3/projects` that links to each one, under its folder name, and the
+project behaves exactly as if you had added a parent folder holding them. Agents start there and
+can read and edit every linked folder; your files stay where they are. Add or remove folders later
+under **Folders** in the project's settings, or link one by hand into the project folder. Removing
+a folder only removes its link.
+
 ## Create a pull request
 
 Use a thread's Git actions to commit, push, and create a pull request. T3 Code can generate commit

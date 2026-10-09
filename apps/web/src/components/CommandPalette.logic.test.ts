@@ -13,6 +13,7 @@ import {
   filterPinnedBrowseEntries,
   filterCommandPaletteGroups,
   findHighlightedCommandPaletteItem,
+  getBrowseSubmitLabel,
   reduceCommandPaletteUiState,
   type CommandPaletteActionItem,
   type CommandPaletteGroup,
@@ -253,6 +254,16 @@ describe("reduceCommandPaletteUiState", () => {
       open: true,
       mode: "command",
       openIntent: { kind: "new-thread-in" },
+    });
+    const target = {
+      environmentId: EnvironmentId.make("env"),
+      projectId: ProjectId.make("project"),
+      projectName: "Storefront",
+    };
+    expect(reduceCommandPaletteUiState(filesOpen, { _tag: "OpenLinkFolders", target })).toEqual({
+      open: true,
+      mode: "command",
+      openIntent: { kind: "link-folders", target },
     });
   });
 
@@ -721,6 +732,7 @@ describe("buildBrowseGroups", () => {
       canBrowseUp: false,
       upIcon: null,
       directoryIcon: null,
+      gitRepositoryIcon: null,
       browseUp: vi.fn(),
       browseTo,
     });
@@ -741,6 +753,81 @@ describe("buildBrowseGroups", () => {
     finishNavigation?.();
     await action;
     expect(actionSettled).toBe(true);
+  });
+
+  it("marks repositories and keeps every entry navigating", async () => {
+    const browseTo = vi.fn();
+    const [group] = buildBrowseGroups({
+      browseEntries: [
+        { name: "api", fullPath: "/code/api", isGitRepository: true },
+        { name: "notes", fullPath: "/code/notes", isGitRepository: false },
+        { name: "old", fullPath: "/code/old" },
+      ],
+      browseQuery: "/code/",
+      canBrowseUp: false,
+      upIcon: "up",
+      directoryIcon: "folder",
+      gitRepositoryIcon: "repo",
+      browseUp: vi.fn(),
+      browseTo,
+    });
+
+    // The icon marks a repository for everyone; the label only while picking.
+    expect(group?.items.map((item) => [item.title, item.icon, item.description])).toEqual([
+      ["api", "repo", undefined],
+      ["notes", "folder", undefined],
+      ["old", "folder", undefined],
+    ]);
+    const repository = group?.items[0];
+    if (repository?.kind !== "action") throw new Error("Expected a browse action");
+    await repository.run();
+    expect(browseTo).toHaveBeenCalledWith("api");
+  });
+});
+
+describe("picking several folders", () => {
+  it("adds trailing content to every entry, after ..", () => {
+    const [group] = buildBrowseGroups({
+      browseEntries: [{ name: "api", fullPath: "/code/api", isGitRepository: true }],
+      browseQuery: "/code/",
+      canBrowseUp: true,
+      upIcon: "up",
+      directoryIcon: "folder",
+      gitRepositoryIcon: "repo",
+      browseUp: vi.fn(),
+      browseTo: vi.fn(),
+      describeRepositories: true,
+      entryTrailingContent: (entry) => `included:${entry.name}`,
+    });
+
+    expect(
+      group?.items.map((item) => [
+        item.value,
+        item.icon,
+        item.description,
+        item.titleTrailingContent ?? null,
+      ]),
+    ).toEqual([
+      ["browse:up", "up", undefined, null],
+      ["browse:/code/api", "repo", "Git repository", "included:api"],
+    ]);
+  });
+
+  it("submits to the name step once folders are included", () => {
+    const base = { isCloneDestination: false, willCreatePath: false };
+    expect(getBrowseSubmitLabel({ ...base, hasPickedFolders: true })).toBe("Next");
+    expect(getBrowseSubmitLabel({ ...base, hasPickedFolders: false })).toBe("Add");
+    // Picked for an existing project, the folders are added rather than named.
+    expect(getBrowseSubmitLabel({ ...base, hasPickedFolders: true, linkTo: "Storefront" })).toBe(
+      "Add to Storefront",
+    );
+    expect(
+      getBrowseSubmitLabel({
+        hasPickedFolders: false,
+        isCloneDestination: true,
+        willCreatePath: true,
+      }),
+    ).toBe("Create & Clone");
   });
 });
 

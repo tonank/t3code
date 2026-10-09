@@ -12,7 +12,11 @@ import {
   buildAddProjectRemoteSourceReadiness,
   buildProjectCreateCommand,
   canCreateProjectInEnvironment,
+  canPickFoldersInLocalFolder,
   findExistingAddProject,
+  foldersToLink,
+  isFolderLinked,
+  isFolderPicked,
   getAddProjectInitialQuery,
   getCloneDestinationBrowsePath,
   getCloneDestinationPath,
@@ -23,6 +27,7 @@ import {
   normalizePastedCloneUrl,
   resolveAddProjectPath,
   sortAddProjectProviderSources,
+  togglePickedFolder,
 } from "./projects.ts";
 import type { EnvironmentProject } from "../state/models.ts";
 
@@ -312,5 +317,69 @@ describe("new project publish targets", () => {
     expect(
       getNewProjectPublishTarget(targets, SourceControlProviderKind.make("gitlab"))?.owner,
     ).toBe("group");
+  });
+});
+
+describe("picking several folders", () => {
+  const api = { path: "/code/api", name: "api", isGitRepository: true };
+  const notes = { path: "/code/notes", name: "notes", isGitRepository: false };
+
+  it("picks a folder once and unpicks it however its path is written", () => {
+    const picked = togglePickedFolder([], { ...api, path: " /code/api " });
+    expect(picked).toEqual([api]);
+    expect(isFolderPicked(picked, "/code/api/")).toBe(true);
+    expect(togglePickedFolder(picked, { ...api, path: "/code/api/" })).toEqual([]);
+  });
+
+  it("keeps folders in the order they were picked", () => {
+    let picked = togglePickedFolder([], api);
+    picked = togglePickedFolder(picked, notes);
+    picked = togglePickedFolder(picked, api);
+    picked = togglePickedFolder(picked, api);
+    expect(picked).toEqual([notes, api]);
+  });
+
+  it("matches Windows folders case-insensitively", () => {
+    const picked = [{ path: "C:\\Code\\Api", name: "Api", isGitRepository: false }];
+    expect(isFolderPicked(picked, "c:\\code\\api")).toBe(true);
+    expect(
+      togglePickedFolder(picked, { path: "c:/code/api", name: "api", isGitRepository: false }),
+    ).toEqual([]);
+  });
+
+  it("links only the picked folders the project does not have, by the same identity", () => {
+    const linked = [
+      { name: "api", path: "/code/api", linked: true },
+      { name: "Docs", path: "C:\\Code\\Docs", linked: true },
+    ];
+    expect(isFolderLinked(linked, "c:/code/docs/")).toBe(true);
+    expect(foldersToLink([api, notes], linked)).toEqual([notes]);
+    expect(foldersToLink([api], linked)).toEqual([]);
+  });
+
+  it("offers picking only with the device setting on, or when adding to a project", () => {
+    const base = {
+      browsingLocalFolder: true,
+      serverSupportsMultiFolder: true,
+      linking: false,
+      canLink: true,
+      enabledOnDevice: false,
+      canCreateHere: true,
+    };
+    expect(canPickFoldersInLocalFolder(base)).toBe(false);
+    expect(canPickFoldersInLocalFolder({ ...base, enabledOnDevice: true })).toBe(true);
+    expect(
+      canPickFoldersInLocalFolder({ ...base, enabledOnDevice: true, canCreateHere: false }),
+    ).toBe(false);
+    expect(
+      canPickFoldersInLocalFolder({
+        ...base,
+        enabledOnDevice: true,
+        serverSupportsMultiFolder: false,
+      }),
+    ).toBe(false);
+    // Adding to an existing project ignores the setting and needs the link permission.
+    expect(canPickFoldersInLocalFolder({ ...base, linking: true })).toBe(true);
+    expect(canPickFoldersInLocalFolder({ ...base, linking: true, canLink: false })).toBe(false);
   });
 });

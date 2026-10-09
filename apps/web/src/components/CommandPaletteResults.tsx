@@ -29,7 +29,10 @@ interface CommandPaletteResultsProps {
   highlightedItemValue?: string | null;
   isActionsOnly: boolean;
   keybindings: ResolvedKeybindingsConfig;
-  onExecuteItem: (item: CommandPaletteActionItem | CommandPaletteSubmenuItem) => void;
+  onExecuteItem: (
+    item: CommandPaletteActionItem | CommandPaletteSubmenuItem,
+    options?: { readonly shiftKey: boolean },
+  ) => void;
 }
 
 function CommandPaletteEmptyState(props: { emptyStateMessage?: string; isActionsOnly: boolean }) {
@@ -192,7 +195,10 @@ function CommandPaletteResultRow(props: {
   item: CommandPaletteActionItem | CommandPaletteSubmenuItem;
   isActive: boolean;
   keybindings: ResolvedKeybindingsConfig;
-  onExecuteItem: (item: CommandPaletteActionItem | CommandPaletteSubmenuItem) => void;
+  onExecuteItem: (
+    item: CommandPaletteActionItem | CommandPaletteSubmenuItem,
+    options?: { readonly shiftKey: boolean },
+  ) => void;
 }) {
   const shortcutLabel = props.item.shortcutCommand
     ? shortcutLabelForCommand(props.keybindings, props.item.shortcutCommand)
@@ -206,8 +212,8 @@ function CommandPaletteResultRow(props: {
       onMouseDown={(event) => {
         event.preventDefault();
       }}
-      onClick={() => {
-        props.onExecuteItem(props.item);
+      onClick={(event) => {
+        props.onExecuteItem(props.item, { shiftKey: event.shiftKey });
       }}
     >
       {props.item.icon}

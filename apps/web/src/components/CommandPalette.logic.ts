@@ -1,5 +1,8 @@
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
-import type { CommandPaletteLinkedThreads } from "../commandPaletteBus";
+import type {
+  CommandPaletteLinkFoldersTarget,
+  CommandPaletteLinkedThreads,
+} from "../commandPaletteBus";
 import {
   type EnvironmentId,
   type FilesystemBrowseEntry,
@@ -62,6 +65,7 @@ export type SearchOverlayMode = "command" | "files" | "content";
 
 export type CommandPaletteOpenIntent =
   | { readonly kind: "add-project" | "new-thread-in" | "change-theme" }
+  | { readonly kind: "link-folders"; readonly target: CommandPaletteLinkFoldersTarget }
   | {
       readonly kind: "search";
       readonly query: string;
@@ -85,6 +89,7 @@ export type CommandPaletteUiAction =
   | { readonly _tag: "OpenAddProject" }
   | { readonly _tag: "OpenNewThreadIn" }
   | { readonly _tag: "OpenChangeTheme" }
+  | { readonly _tag: "OpenLinkFolders"; readonly target: CommandPaletteLinkFoldersTarget }
   | { readonly _tag: "ClearOpenIntent" };
 
 export function reduceCommandPaletteUiState(
@@ -116,6 +121,12 @@ export function reduceCommandPaletteUiState(
       return { open: true, mode: "command", openIntent: { kind: "new-thread-in" } };
     case "OpenChangeTheme":
       return { open: true, mode: "command", openIntent: { kind: "change-theme" } };
+    case "OpenLinkFolders":
+      return {
+        open: true,
+        mode: "command",
+        openIntent: { kind: "link-folders", target: action.target },
+      };
     case "ClearOpenIntent":
       return state.openIntent ? { ...state, openIntent: null } : state;
   }
@@ -526,8 +537,13 @@ export function buildBrowseGroups(input: {
   canBrowseUp: boolean;
   upIcon: ReactNode;
   directoryIcon: ReactNode;
+  gitRepositoryIcon: ReactNode;
   browseUp: () => void | Promise<void>;
   browseTo: (name: string) => void | Promise<void>;
+  /** Labels repository rows "Git repository" while folders are being picked. */
+  describeRepositories?: boolean;
+  /** Trailing content for an entry's row, e.g. a mark on folders already included. */
+  entryTrailingContent?: (entry: FilesystemBrowseEntry) => ReactNode;
 }): CommandPaletteGroup[] {
   const items: CommandPaletteActionItem[] = [];
 
@@ -546,12 +562,18 @@ export function buildBrowseGroups(input: {
   }
 
   for (const entry of input.browseEntries) {
+    const isGitRepository = entry.isGitRepository === true;
+    const icon = isGitRepository ? input.gitRepositoryIcon : input.directoryIcon;
     items.push({
       kind: "action",
       value: `browse:${entry.fullPath}`,
       searchTerms: [input.browseQuery, entry.fullPath, entry.name],
       title: entry.name,
-      icon: input.directoryIcon,
+      ...(isGitRepository && input.describeRepositories ? { description: "Git repository" } : {}),
+      icon,
+      ...(input.entryTrailingContent
+        ? { titleTrailingContent: input.entryTrailingContent(entry) }
+        : {}),
       keepOpen: true,
       run: async () => {
         await input.browseTo(entry.name);
@@ -560,6 +582,24 @@ export function buildBrowseGroups(input: {
   }
 
   return [{ value: "directories", label: "Directories", items }];
+}
+
+/**
+ * The browse view's submit button: add the path as a project, clone into it,
+ * or, while picking several folders, go on to name the project.
+ */
+export function getBrowseSubmitLabel(input: {
+  /** Folders are picked for a multi-folder project, which is named next. */
+  readonly hasPickedFolders: boolean;
+  /** The project the picked folders are added to, instead of a new one. */
+  readonly linkTo?: string | null;
+  readonly isCloneDestination: boolean;
+  readonly willCreatePath: boolean;
+}): string {
+  if (input.linkTo) return `Add to ${input.linkTo}`;
+  if (input.hasPickedFolders) return "Next";
+  if (input.isCloneDestination) return input.willCreatePath ? "Create & Clone" : "Clone";
+  return input.willCreatePath ? "Create & Add" : "Add";
 }
 
 export function filterPinnedBrowseEntries(input: {

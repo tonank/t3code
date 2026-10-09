@@ -3108,6 +3108,32 @@ export function GeneralSettingsPanel() {
             />
           }
         />
+        <SettingsRow
+          {...searchableSetting("multi-folder-projects")}
+          description="In Add Project → Local folder, Shift+Enter or Shift+click folders to combine them into one project."
+          resetAction={
+            settings.multiFolderProjectsEnabled !==
+            DEFAULT_UNIFIED_SETTINGS.multiFolderProjectsEnabled ? (
+              <SettingResetButton
+                label="multi-folder projects"
+                onClick={() =>
+                  updateSettings({
+                    multiFolderProjectsEnabled: DEFAULT_UNIFIED_SETTINGS.multiFolderProjectsEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.multiFolderProjectsEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ multiFolderProjectsEnabled: Boolean(checked) })
+              }
+              aria-label="Multi-folder projects"
+            />
+          }
+        />
       </SettingsSection>
 
       <SettingsSection id="confirmations" title="Confirmations">

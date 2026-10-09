@@ -519,6 +519,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["base directory folder browser path home"],
   },
   {
+    id: "multi-folder-projects",
+    title: "Multi-folder projects",
+    to: "/settings/general",
+    searchTerms: ["multiple folders repositories combine monorepo local folder"],
+  },
+  {
     id: "unpin-confirmation",
     title: "Unpin confirmation",
     to: "/settings/general",

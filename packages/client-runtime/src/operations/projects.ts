@@ -4,12 +4,13 @@ import type {
   EnvironmentId,
   ProjectMutation,
   ProjectId,
+  ProjectLinkedFolder,
   ServerConfig,
   SourceControlDiscoveryResult,
   SourceControlRepositoryInfo,
 } from "@t3tools/contracts";
 import { SourceControlProviderKind } from "@t3tools/contracts";
-import { newProjectFolderName } from "@t3tools/shared/path";
+import { newProjectFolderName, normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Arr from "effect/Array";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
@@ -340,4 +341,77 @@ export function buildProjectCreateCommand(input: {
     createWorkspaceRootIfMissing: true,
     defaultModelSelection: null,
   };
+}
+
+/**
+ * A folder picked in Add Project → Local folder for a multi-folder project, or
+ * to add to one. Web and mobile share this model so a folder means the same
+ * thing on every client.
+ */
+export interface PickedFolder {
+  readonly path: string;
+  readonly name: string;
+  /** Known only when picked from its parent's listing. */
+  readonly isGitRepository: boolean;
+}
+
+/**
+ * Identity of a picked folder: Windows paths match case-insensitively, and a
+ * trailing separator does not make a second folder.
+ */
+export function pickedFolderKey(path: string): string {
+  return normalizeProjectPathForComparison(path.trim());
+}
+
+export function isFolderPicked(picked: ReadonlyArray<PickedFolder>, path: string): boolean {
+  const key = pickedFolderKey(path);
+  return picked.some((folder) => pickedFolderKey(folder.path) === key);
+}
+
+/** Picks a folder, or unpicks it when it is already picked. */
+export function togglePickedFolder(
+  picked: ReadonlyArray<PickedFolder>,
+  folder: PickedFolder,
+): ReadonlyArray<PickedFolder> {
+  const path = folder.path.trim();
+  if (isFolderPicked(picked, path)) {
+    const key = pickedFolderKey(path);
+    return picked.filter((candidate) => pickedFolderKey(candidate.path) !== key);
+  }
+  return [...picked, { ...folder, path }];
+}
+
+/** Whether the project already links `path`, by the same identity as picking. */
+export function isFolderLinked(
+  linked: ReadonlyArray<Pick<ProjectLinkedFolder, "path">>,
+  path: string,
+): boolean {
+  const key = pickedFolderKey(path);
+  return linked.some((folder) => pickedFolderKey(folder.path) === key);
+}
+
+/** Adding to a project: the picked folders it does not have yet, in the order they were picked. */
+export function foldersToLink(
+  picked: ReadonlyArray<PickedFolder>,
+  linked: ReadonlyArray<Pick<ProjectLinkedFolder, "path">>,
+): ReadonlyArray<PickedFolder> {
+  return picked.filter((folder) => !isFolderLinked(linked, folder.path));
+}
+
+/**
+ * Whether Local folder offers picking several folders. Off by default: the
+ * device setting must be on and the environment able to make a multi-folder
+ * project for this connection, except when adding folders to an existing
+ * project, which needs only the link permission.
+ */
+export function canPickFoldersInLocalFolder(input: {
+  readonly browsingLocalFolder: boolean;
+  readonly serverSupportsMultiFolder: boolean;
+  readonly linking: boolean;
+  readonly canLink: boolean;
+  readonly enabledOnDevice: boolean;
+  readonly canCreateHere: boolean;
+}): boolean {
+  if (!input.browsingLocalFolder || !input.serverSupportsMultiFolder) return false;
+  return input.linking ? input.canLink : input.enabledOnDevice && input.canCreateHere;
 }
